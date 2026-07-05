@@ -6,7 +6,7 @@ from datetime import timedelta
 from typing import Annotated
 
 import jwt
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -178,8 +178,12 @@ async def refresh(payload: RefreshRequest, session: AnonDbSession) -> TokenPair:
     return _make_pair(user)
 
 
-@router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
-async def logout(current: CurrentUser, session: DbSession) -> None:
+@router.post(
+    "/logout",
+    status_code=status.HTTP_204_NO_CONTENT,
+    response_class=Response,
+)
+async def logout(current: CurrentUser, session: DbSession):
     """Revoke all outstanding tokens for the current user.
 
     Bumps `token_version` so every access/refresh token issued before this
