@@ -28,7 +28,7 @@ function Protected({ children }) {
         aria-live="polite"
         style={{
           padding: 24,
-          color: 'var(--muted, #888)',
+          color: 'var(--text-dim)',
           fontFamily: 'system-ui, sans-serif',
         }}
       >

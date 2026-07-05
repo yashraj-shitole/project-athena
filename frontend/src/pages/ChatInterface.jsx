@@ -31,9 +31,14 @@ export default function ChatInterface() {
     deleteConversation,
     appendMessage,
     refreshActive,
+    clearActive,
   } = useChatStore();
 
   const stream = useChatStream();
+  // `stream` is a fresh object every render, but `reset`/`cancel` are stable
+  // useCallback fns. Capture them by reference so effects depending on them
+  // don't re-run on every render (which would, e.g., abort an in-flight POST).
+  const { reset: streamReset, cancel: streamCancel } = stream;
   // Capture cancel in a ref so the unmount-cleanup effect has a stable
   // identity. If we depended on `stream` directly, the hook returns a
   // new object on every render, the effect would re-run on every
@@ -42,8 +47,8 @@ export default function ChatInterface() {
   // resource" in DevTools.
   const cancelRef = useRef(null);
   useEffect(() => {
-    cancelRef.current = stream.cancel;
-  }, [stream.cancel]);
+    cancelRef.current = streamCancel;
+  }, [streamCancel]);
 
   const [input, setInput] = useState('');
   const composerRef = useRef(null);
@@ -60,8 +65,17 @@ export default function ChatInterface() {
   useEffect(() => {
     if (conversationId) {
       openConversation(conversationId);
+    } else {
+      // On /chat with no conversation id, drop any leftover active
+      // conversation + transcript. Without this, "+ New chat" (and a direct
+      // nav to /chat) left the previous conversation's id/messages in the
+      // store: the old transcript stayed on screen and new sends were
+      // persisted into the old conversation. stream.reset() also clears any
+      // leftover stream bubble / error from the prior turn.
+      streamReset();
+      clearActive();
     }
-  }, [conversationId, openConversation]);
+  }, [conversationId, openConversation, clearActive, streamReset]);
 
   // Cancel any in-flight stream on unmount so we don't leak sockets.
   // Depends on the stable ref, not on `stream`, so re-renders during a
@@ -83,9 +97,16 @@ export default function ChatInterface() {
     if (sendingRef.current || stream.runId) return;
 
     // Make sure we have a conversation to attach the message to.
+    const wasNew = !active;
     let convId = active;
     if (!convId) convId = await startNew();
     if (!convId) return;
+
+    // Sync the URL when a brand-new conversation was just created from the
+    // /chat empty state. Without this the URL stayed /chat, so a refresh
+    // dropped the active conversation (only reachable via the sidebar).
+    // replace:true avoids leaving the bare /chat entry in history.
+    if (wasNew) nav(`/chat/${convId}`, { replace: true });
 
     sendingRef.current = true;
     const userTempId = tempId();
@@ -115,11 +136,28 @@ export default function ChatInterface() {
       sendingRef.current = false;
     }
 
+    // The stream hook's `finally` clears `runId` before this await resolves,
+    // which unmounts the stream bubble. The assistant text lived only in
+    // `stream.text`, so without carrying it into `messages` the user saw a
+    // flash of no-assistant-reply during the refreshActive round-trip.
+    // Append the streamed turn optimistically; refreshActive's fingerprint
+    // dedup drops this local copy once the server returns the real message.
+    if (sentOk && stream.text) {
+      appendMessage({
+        id: tempId(),
+        seq: 0,
+        role: 'assistant',
+        content: stream.text,
+        citations: stream.citations,
+        used_tools: stream.usedTools,
+        created_at: new Date().toISOString(),
+      });
+    }
+
     // Reconcile with the server. The user's local message (pending) is
-    // dropped because the server has the same content+role now. The
-    // assistant message was never appended locally — the stream-bubble
-    // showed it during the run and `refreshActive` pulls the real
-    // (with citations/used_tools) one from the server.
+    // dropped because the server has the same content+role now; the
+    // optimistic assistant copy is dropped the same way once the server's
+    // version (with the real id, citations, used_tools) arrives.
     if (sentOk) {
       await refreshActive();
     }
@@ -170,7 +208,16 @@ export default function ChatInterface() {
               <button
                 className="secondary"
                 style={{ padding: '2px 6px', fontSize: 12 }}
-                onClick={() => deleteConversation(c.id)}
+                onClick={async () => {
+                  const wasActive = c.id === active;
+                  await deleteConversation(c.id);
+                  // deleteConversation resets active/messages when the active
+                  // conv is deleted, but never updates the URL — so it left a
+                  // stale /chat/:deletedId that 404'd on refresh/back-nav and
+                  // rendered a blank panel. Navigate to /chat to match the
+                  // now-empty store.
+                  if (wasActive) nav('/chat', { replace: true });
+                }}
                 aria-label={`Delete ${c.title || 'conversation'}`}
               >
                 ×
@@ -226,16 +273,21 @@ export default function ChatInterface() {
                       .join(', ')}
                   </div>
                 )}
-                {stream.error && (
-                  <div
-                    className="bubble"
-                    style={{ borderColor: 'var(--danger)' }}
-                    role="alert"
-                  >
-                    Error: {stream.error}
-                  </div>
-                )}
               </>
+            )}
+            {/* Error bubble is hoisted OUT of the runId guard: failures that
+                happen before RUN_STARTED (network drop, 401, 4xx/5xx on the
+                POST, abort before the reader loop) leave runId null, so
+                nesting it inside the guard rendered nothing and the app
+                appeared to hang silently. */}
+            {stream.error && (
+              <div
+                className="bubble"
+                style={{ borderColor: 'var(--danger)' }}
+                role="alert"
+              >
+                Error: {stream.error}
+              </div>
             )}
             {!active && messages.length === 0 && !stream.runId && (
               <div

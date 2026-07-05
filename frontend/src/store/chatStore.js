@@ -124,10 +124,15 @@ export const useChatStore = create((set, get) => ({
     const list = get().messages;
     // Dedupe by id (the streaming-finish path can fire twice).
     if (msg.id && list.some((m) => m.id === msg.id)) return;
-    // Also dedupe by fingerprint so two rapid clicks with the same
-    // content don't both appear before the server confirms.
+    // NOTE: we intentionally do NOT dedupe by content fingerprint against the
+    // full list here. A global `role|content` check silently dropped a second
+    // genuinely-distinct send whose text happened to match an earlier message
+    // (e.g. "hello" twice) — the optimistic append vanished until the server
+    // round-trip resolved. Rapid double-clicks are already blocked by the
+    // sendingRef/stream.runId guard in ChatInterface and by the id check
+    // above; the pending-set logic in refreshActive is the only dedup needed
+    // to collapse a local copy once the server confirms it.
     const fp = fingerprint(msg);
-    if (fp && list.some((m) => fingerprint(m) === fp)) return;
     const nextPending = new Set(get().pending);
     if (fp) nextPending.add(fp);
     set({ messages: [...list, msg], pending: nextPending });
@@ -135,6 +140,18 @@ export const useChatStore = create((set, get) => ({
 
   setActive(id) {
     set({ active: id });
+  },
+
+  /**
+   * Reset the active conversation view without a server call. Used when the
+   * user starts a new chat ("+ New chat") or lands on /chat with no
+   * conversation id: the URL is /chat but the store still held the previous
+   * conversation's id + messages, so the old transcript stayed on screen and
+   * new sends were persisted into the old conversation. Clearing here makes
+   * the empty-state render and forces onSend down the startNew() path.
+   */
+  clearActive() {
+    set({ active: null, messages: [], pending: new Set() });
   },
 
   /**

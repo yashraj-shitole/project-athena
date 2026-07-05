@@ -1,5 +1,5 @@
 import { useEffect, useSyncExternalStore } from 'react';
-import { getToken, setTokens, clearTokens } from '../services/apiClient.js';
+import { getToken, setTokens, clearTokens, AUTH_EVENT } from '../services/apiClient.js';
 import authService from '../services/authService.js';
 
 /**
@@ -32,6 +32,32 @@ function emit() {
 function setState(patch) {
   _state = { ..._state, ...patch };
   emit();
+}
+
+/**
+ * Keep the singleton in sync with `athena:auth-failed`.
+ *
+ * apiClient._handle401 clears localStorage and dispatches AUTH_EVENT when a
+ * request comes back 401. Without this listener the singleton's `_state.token`
+ * stays stale (it is only mutated by login/register/logout/refresh/bootstrap),
+ * so localStorage and the singleton diverge. That divergence caused an
+ * infinite redirect loop: AuthBoundary navs to /login?next=/chat, Login's
+ * `navigate when ready && token` effect trusts the stale singleton token and
+ * navs straight back to /chat, Protected renders ChatInterface, it fires
+ * loadConversations -> 401 -> repeat. The user is locked out of the login
+ * form entirely.
+ *
+ * Registering at module load (useAuth is imported transitively before
+ * AuthBoundary mounts) means this handler runs synchronously during
+ * dispatchEvent, before AuthBoundary's listener, flipping token to null so
+ * Login's effect no-ops and Protected redirects instead of rendering. The
+ * `if (_state.token)` guard avoids a redundant emit when bootstrap-logout
+ * already cleared it. No circular import: apiClient does not import useAuth.
+ */
+if (typeof window !== 'undefined') {
+  window.addEventListener(AUTH_EVENT, () => {
+    if (_state.token) setState({ token: null, user: null, ready: true });
+  });
 }
 
 let _bootstrapPromise = null;

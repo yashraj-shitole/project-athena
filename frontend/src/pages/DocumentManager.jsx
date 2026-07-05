@@ -19,6 +19,8 @@ export default function DocumentManager() {
   const [uploading, setUploading] = useState(false);
   const [err, setErr] = useState(null);
   const [pendingDelete, setPendingDelete] = useState(null);
+  const [deletingId, setDeletingId] = useState(null);
+  const [loadedOnce, setLoadedOnce] = useState(false);
   const fileRef = useRef(null);
   const [filter, setFilter] = useState('');
 
@@ -40,6 +42,12 @@ export default function DocumentManager() {
     } catch (e) {
       if (e.aborted) return;
       setErr(e.message);
+    } finally {
+      // Mark first load complete on success OR failure so the initial
+      // "No documents yet" flash (painted before the first fetch resolves)
+      // is replaced by a neutral loading state instead of a misleading
+      // empty-account message.
+      setLoadedOnce(true);
     }
   }
   loadRef.current = load;
@@ -50,8 +58,14 @@ export default function DocumentManager() {
 
     const tick = async () => {
       if (cancelled) return;
-      await loadRef.current?.();
-      if (cancelled) return;
+      // Skip fetching while the tab is hidden — the line-68 comment promised
+      // this savings but the old handler only re-fetched on becoming visible
+      // and never stopped the self-scheduling loop, so polling continued in
+      // background tabs. Re-schedule slowly and bail until visible again.
+      if (!document.hidden) {
+        await loadRef.current?.();
+        if (cancelled) return;
+      }
       // Pick cadence based on whether anything is in flight. Read
       // the latest docs via the ref so we don't depend on the
       // `docs` state (which would re-run this effect on every tick
@@ -65,10 +79,9 @@ export default function DocumentManager() {
     // Kick off immediately, then self-schedule.
     tick();
 
-    // Pause polling when the tab is hidden — saves battery + bandwidth.
+    // Fire a fresh load when the user comes back to the tab.
     const onVis = () => {
       if (document.visibilityState === 'visible') {
-        // Fire a fresh load when the user comes back.
         loadRef.current?.();
       }
     };
@@ -85,15 +98,29 @@ export default function DocumentManager() {
   async function onPick(e) {
     const f = e.target.files?.[0];
     if (!f) return;
+    // Reset the input value up front, on every path. Previously this ran only
+    // inside `try` after a successful upload, so a failed upload left the
+    // input holding the same file — and browsers don't fire `change` for an
+    // unchanged value, so the user couldn't re-pick the same file to retry
+    // without first choosing a different file or reloading.
+    e.target.value = '';
     setUploading(true);
     setErr(null);
     try {
       await docService.upload(f);
-      e.target.value = '';
       // Force a refresh so the user sees the new row.
       await load();
     } catch (e2) {
-      setErr(e2?.body?.detail || e2?.message || 'upload failed');
+      // Prefer the already-flattened human-readable message. `e2.body.detail`
+      // can be a FastAPI validation array of {loc,msg,...} objects, which
+      // React cannot render ("Objects are not valid as a React child") — so
+      // only fall back to it when it is a plain string.
+      const detail = e2?.body?.detail;
+      const msg =
+        (typeof detail === 'string' ? detail : null) ||
+        e2?.message ||
+        'upload failed';
+      setErr(msg);
     } finally {
       setUploading(false);
     }
@@ -104,13 +131,21 @@ export default function DocumentManager() {
     // `pendingDelete` is the full document object (set in the row's
     // Delete button). Pull out the id; otherwise the request goes to
     // `/api/documents/[object Object]` and 422s.
-    const id = pendingDelete.id;
-    setPendingDelete(null);
+    const doc = pendingDelete;
+    setDeletingId(doc.id);
     try {
-      await docService.remove(id);
+      await docService.remove(doc.id);
+      // Close the modal only after the delete succeeds. Previously
+      // setPendingDelete(null) ran before the await, so the in-flight
+      // DELETE gave no feedback, the row's Delete button stayed clickable
+      // (allowing a duplicate concurrent delete), and a failure surfaced
+      // only as a generic banner with no indication of which file failed.
+      setPendingDelete(null);
       await load();
     } catch (e) {
-      setErr(e.message);
+      setErr(`Could not delete ${doc.filename}: ${e.message}`);
+    } finally {
+      setDeletingId(null);
     }
   }
 
@@ -209,21 +244,39 @@ export default function DocumentManager() {
                   <button
                     className="danger"
                     onClick={() => setPendingDelete(d)}
+                    disabled={deletingId === d.id}
                   >
-                    Delete
+                    {deletingId === d.id ? 'Deleting…' : 'Delete'}
                   </button>
                 </div>
               </div>
             ))}
-            {visible.length === 0 && (
-              <div
-                className="card"
-                style={{ textAlign: 'center', color: 'var(--text-dim)' }}
-              >
-                No documents yet. Upload a CSV/XLSX/PDF/DOC/DOCX/TXT/MD/HTML
-                to get started.
-              </div>
-            )}
+            {visible.length === 0 &&
+              (loadedOnce ? (
+                docs.length === 0 ? (
+                  <div
+                    className="card"
+                    style={{ textAlign: 'center', color: 'var(--text-dim)' }}
+                  >
+                    No documents yet. Upload a
+                    CSV/XLSX/PDF/DOC/DOCX/TXT/MD/HTML to get started.
+                  </div>
+                ) : (
+                  <div
+                    className="card"
+                    style={{ textAlign: 'center', color: 'var(--text-dim)' }}
+                  >
+                    No documents match the “{filter}” filter.
+                  </div>
+                )
+              ) : (
+                <div
+                  className="card"
+                  style={{ textAlign: 'center', color: 'var(--text-dim)' }}
+                >
+                  Loading documents…
+                </div>
+              ))}
           </div>
         </div>
       </main>
@@ -249,11 +302,16 @@ export default function DocumentManager() {
               <button
                 className="secondary"
                 onClick={() => setPendingDelete(null)}
+                disabled={!!deletingId}
               >
                 Cancel
               </button>
-              <button className="danger" onClick={onConfirmDelete}>
-                Delete
+              <button
+                className="danger"
+                onClick={onConfirmDelete}
+                disabled={!!deletingId}
+              >
+                {deletingId ? 'Deleting…' : 'Delete'}
               </button>
             </div>
           </div>

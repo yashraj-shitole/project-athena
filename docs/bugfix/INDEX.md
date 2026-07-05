@@ -77,3 +77,10 @@ _61 confirmed findings across 9 dimensions. Sorted by severity then dimension th
 - [Async, Cache & Database Session Hygiene](./async-cache-db.md) - 3 finding(s)
 - [Frontend (SPA / API Client)](./frontend.md) - 3 finding(s)
 - [Infrastructure, Secrets & Deployment Hardening](./infra-secrets.md) - 16 finding(s)
+
+## Companion audit: Frontend UI-State (separate pass)
+
+A separate, later audit focused on **UI state not updating after actions / non-smooth UX**
+(not security). It confirmed **19 unique findings (+2 second-lens duplicates, +3 rejected)**
+across 5 lenses (auth-state-sync, chat-stream-reconcile, documents-ui, routing-navigation,
+css-ux-smoothness) — all fixed. See [`frontend-ui-state.md`](./frontend-ui-state.md).

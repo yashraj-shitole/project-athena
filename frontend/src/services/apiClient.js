@@ -42,7 +42,48 @@ export function clearTokens() {
   localStorage.removeItem('athena_refresh');
 }
 
-function _handle401(reason) {
+// A refresh token is stored on login/register but was never redeemed — every
+// access-token expiry bounced the user to /login and discarded in-memory
+// chat/document state. `_tryRefresh` redeems the refresh token once; concurrent
+// 401s coalesce onto the same in-flight promise so we don't fire N parallel
+// /auth/refresh calls. It uses a raw fetch (not apiClient.post) so a 401 from
+// the refresh endpoint itself can never recurse back into _handle401.
+let _refreshing = null;
+async function _tryRefresh() {
+  const rt = getRefreshToken();
+  if (!rt) return false;
+  if (_refreshing) return _refreshing;
+  _refreshing = (async () => {
+    try {
+      const res = await fetch(`${BASE}/auth/refresh`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ refresh_token: rt }),
+      });
+      if (!res.ok) return false;
+      const data = await res.json().catch(() => null);
+      if (!data || !data.access_token) return false;
+      setTokens(data.access_token, data.refresh_token || rt);
+      return true;
+    } catch {
+      return false;
+    } finally {
+      _refreshing = null;
+    }
+  })();
+  return _refreshing;
+}
+
+/**
+ * Handle a 401. Returns true if the access token was silently refreshed and
+ * the caller should retry the original request once; false if the session is
+ * terminal (tokens cleared + AUTH_EVENT dispatched so the React layer
+ * redirects). The refresh attempt runs first, so a valid refresh token no
+ * longer forces a re-login.
+ */
+async function _handle401(reason) {
+  const refreshed = await _tryRefresh();
+  if (refreshed) return true;
   clearTokens();
   // Tell the app to redirect — listeners (e.g. a top-level <AuthBoundary/>)
   // can use the router and preserve location state.
@@ -57,6 +98,7 @@ function _handle401(reason) {
       location.href = `/login?next=${next}`;
     }
   }, 0);
+  return false;
 }
 
 async function _readError(res) {
@@ -107,43 +149,52 @@ function _timeoutSignal(ms) {
 }
 
 async function request(path, opts = {}) {
-  const headers = { ...(opts.headers || {}) };
+  const baseHeaders = { ...(opts.headers || {}) };
   // Only set Content-Type when there's a JSON body. Setting it on a bodyless
   // GET/DELETE is harmless in spec but some proxies/load-balancers will
   // strip the request and reject. Multipart uploads leave it unset
   // so the browser fills in the boundary.
   const hasJsonBody = opts.body !== undefined && opts.body !== null;
-  if (hasJsonBody) headers['Content-Type'] = headers['Content-Type'] || 'application/json';
-  const token = getToken();
-  if (token) headers.Authorization = `Bearer ${token}`;
+  if (hasJsonBody) baseHeaders['Content-Type'] = baseHeaders['Content-Type'] || 'application/json';
 
-  const owned = opts.signal ? null : _timeoutSignal(opts.timeoutMs ?? DEFAULT_TIMEOUT_MS);
-  const signal = opts.signal || owned.signal;
-
-  let res;
-  try {
-    res = await fetch(`${BASE}${path}`, { ...opts, headers, signal });
-  } catch (e) {
-    if (e.name === 'AbortError') {
-      const err = new Error('Request cancelled');
+  // Single fetch attempt. Reads the token fresh each call so a retry after
+  // refresh picks up the new access token. Each call owns (and clears) its
+  // own timeout signal.
+  async function attempt() {
+    const headers = { ...baseHeaders };
+    const token = getToken();
+    if (token) headers.Authorization = `Bearer ${token}`;
+    const owned = opts.signal ? null : _timeoutSignal(opts.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+    const signal = opts.signal || owned.signal;
+    try {
+      return await fetch(`${BASE}${path}`, { ...opts, headers, signal });
+    } catch (e) {
+      if (e.name === 'AbortError') {
+        const err = new Error('Request cancelled');
+        err.status = 0;
+        err.aborted = true;
+        throw err;
+      }
+      // Network / DNS / CORS — surface a friendly message.
+      const err = new Error('Cannot reach the server. Check your connection.');
       err.status = 0;
-      err.aborted = true;
+      err.cause = e;
       throw err;
+    } finally {
+      if (owned) owned.clear();
     }
-    // Network / DNS / CORS — surface a friendly message.
-    const err = new Error('Cannot reach the server. Check your connection.');
-    err.status = 0;
-    err.cause = e;
-    throw err;
-  } finally {
-    if (owned) owned.clear();
   }
 
+  let res = await attempt();
   if (res.status === 401) {
-    _handle401('request');
-    const err = new Error('unauthorized');
-    err.status = 401;
-    throw err;
+    // Try to redeem the refresh token; if it succeeds, retry once.
+    const refreshed = await _handle401('request');
+    if (refreshed) res = await attempt();
+    if (res.status === 401) {
+      const err = new Error('unauthorized');
+      err.status = 401;
+      throw err;
+    }
   }
   if (!res.ok) {
     throw await _readError(res);
@@ -165,32 +216,34 @@ export const apiClient = {
    * Content-Type is left unset so the browser sets the boundary.
    */
   async upload(path, formData, opts = {}) {
-    const headers = { ...(opts.headers || {}) };
-    const token = getToken();
-    if (token) headers.Authorization = `Bearer ${token}`;
-    const owned = opts.signal ? null : _timeoutSignal(opts.timeoutMs ?? 5 * 60_000);
-    const signal = opts.signal || owned.signal;
-
-    let res;
-    try {
-      res = await fetch(`${BASE}${path}`, { method: 'POST', body: formData, headers, signal });
-    } catch (e) {
-      if (e.name === 'AbortError') {
-        const err = new Error('Upload cancelled');
+    async function attempt() {
+      const headers = { ...(opts.headers || {}) };
+      const token = getToken();
+      if (token) headers.Authorization = `Bearer ${token}`;
+      const owned = opts.signal ? null : _timeoutSignal(opts.timeoutMs ?? 5 * 60_000);
+      const signal = opts.signal || owned.signal;
+      try {
+        return await fetch(`${BASE}${path}`, { method: 'POST', body: formData, headers, signal });
+      } catch (e) {
+        if (e.name === 'AbortError') {
+          const err = new Error('Upload cancelled');
+          err.status = 0;
+          err.aborted = true;
+          throw err;
+        }
+        const err = new Error('Upload failed: cannot reach the server.');
         err.status = 0;
-        err.aborted = true;
+        err.cause = e;
         throw err;
+      } finally {
+        if (owned) owned.clear();
       }
-      const err = new Error('Upload failed: cannot reach the server.');
-      err.status = 0;
-      err.cause = e;
-      throw err;
-    } finally {
-      if (owned) owned.clear();
     }
+    let res = await attempt();
     if (res.status === 401) {
-      _handle401('upload');
-      throw new Error('unauthorized');
+      const refreshed = await _handle401('upload');
+      if (refreshed) res = await attempt();
+      if (res.status === 401) throw new Error('unauthorized');
     }
     if (!res.ok) {
       const err = await _readError(res);
@@ -210,22 +263,29 @@ export const apiClient = {
    * path as `request()`.
    */
   async stream(path, body, opts = {}) {
-    const headers = { 'Content-Type': 'application/json', ...(opts.headers || {}) };
-    const token = getToken();
-    if (token) headers.Authorization = `Bearer ${token}`;
-    const res = await fetch(`${BASE}${path}`, {
-      method: 'POST',
-      body: JSON.stringify(body),
-      headers,
-      signal: opts.signal,
-    });
+    const attempt = () => {
+      const headers = { 'Content-Type': 'application/json', ...(opts.headers || {}) };
+      const token = getToken();
+      if (token) headers.Authorization = `Bearer ${token}`;
+      return fetch(`${BASE}${path}`, {
+        method: 'POST',
+        body: JSON.stringify(body),
+        headers,
+        signal: opts.signal,
+      });
+    };
+    let res = await attempt();
     if (res.status === 401) {
       // Drain so the connection can be reused, then route to auth-failed.
       try { await res.text(); } catch { /* ignore */ }
-      _handle401('stream');
-      const err = new Error('unauthorized');
-      err.status = 401;
-      throw err;
+      const refreshed = await _handle401('stream');
+      if (refreshed) res = await attempt();
+      if (res.status === 401) {
+        try { await res.text(); } catch { /* ignore */ }
+        const err = new Error('unauthorized');
+        err.status = 401;
+        throw err;
+      }
     }
     if (!res.ok) {
       // Surface non-SSE error bodies (e.g. 413/500) as readable errors.
