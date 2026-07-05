@@ -1,0 +1,167 @@
+# Project Athena — full stack
+#
+# Bring everything up with:
+#   docker compose up -d --build
+#
+# After the first start, the LLM model is downloaded into the `ollama_data`
+# volume by the one-shot `ollama-pull` service. Subsequent restarts skip
+# the download.
+#
+# Ports exposed on the host:
+#   80   → nginx (SPA + reverse proxy to API)
+#   8000 → API (direct, useful for curl / debugging; not required by the SPA)
+#
+# To attach to logs:
+#   docker compose logs -f api nginx
+# To stop and wipe data:
+#   docker compose down -v
+
+services:
+  # -----------------------------------------------------------------------
+  # Postgres + pgvector + tsvector
+  # -----------------------------------------------------------------------
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: athena-postgres
+    environment:
+      POSTGRES_USER: athena
+      POSTGRES_PASSWORD: athena
+      POSTGRES_DB: athena
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/00_init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U athena"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # -----------------------------------------------------------------------
+  # Redis (cache + counters)
+  # -----------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: athena-redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # -----------------------------------------------------------------------
+  # Ollama (long-running)
+  # -----------------------------------------------------------------------
+  ollama:
+    image: ollama/ollama:latest
+    container_name: athena-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    healthcheck:
+      # /api/tags returns 200 once the daemon is listening.
+      test: ["CMD-SHELL", "wget -qO- http://localhost:11434/api/tags >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  # -----------------------------------------------------------------------
+  # One-shot model pull (uses the same ollama_data volume)
+  # -----------------------------------------------------------------------
+  ollama-pull:
+    image: ollama/ollama:latest
+    container_name: athena-ollama-pull
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      ATHENA_OLLAMA_MODEL: qwen2.5:1.5b-instruct
+      OLLAMA_HOST: http://ollama:11434
+    volumes:
+      - ollama_data:/root/.ollama
+      - ./ollama-pull.sh:/ollama-pull.sh:ro
+    entrypoint: ["/bin/sh", "/ollama-pull.sh"]
+    restart: "no"
+
+  # -----------------------------------------------------------------------
+  # Backend API (built from the root Dockerfile's `api` target)
+  # -----------------------------------------------------------------------
+  api:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      target: api
+    container_name: athena-api
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      ATHENA_DATABASE_URL: postgresql+asyncpg://athena:athena@postgres:5432/athena
+      ATHENA_REDIS_URL: redis://redis:6379/0
+      ATHENA_OLLAMA_URL: http://ollama:11434
+      ATHENA_OLLAMA_MODEL: qwen2.5:1.5b-instruct
+      ATHENA_STORAGE_DIR: /app/storage
+      ATHENA_JWT_SECRET: change-me-in-prod   # set in production!
+      ATHENA_TOKEN_BUDGET: "3000"
+      ATHENA_LOG_LEVEL: INFO
+      ATHENA_CORS_ORIGINS: '["http://localhost"]'
+    volumes:
+      - api_storage:/app/storage
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+
+  # -----------------------------------------------------------------------
+  # nginx: serves the SPA + reverse-proxies the API.
+  # The static bundle is built in the same multi-stage Dockerfile, so
+  # `docker compose build` produces a single image that contains both
+  # the SPA and the nginx config.
+  # -----------------------------------------------------------------------
+  nginx:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      target: nginx
+    container_name: athena-nginx
+    depends_on:
+      - api
+    ports:
+      - "80:80"
+    restart: unless-stopped
+
+  # -----------------------------------------------------------------------
+  # Optional: Vite dev server with HMR.
+  #   docker compose --profile dev up web-dev
+  #   Then open http://localhost:5173.
+  # -----------------------------------------------------------------------
+  web-dev:
+    profiles: ["dev"]
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      target: web-dev
+    container_name: athena-web-dev
+    environment:
+      VITE_API_TARGET: http://localhost:8000
+    ports:
+      - "5173:5173"
+    volumes:
+      # Live-reload: mount the source so edits on the host show up in the
+      # container. node_modules is named-volumed so the host's modules
+      # don't override the container's.
+      - ../frontend:/app
+      - webdev_node_modules:/app/node_modules
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  ollama_data:
+  api_storage:
+  webdev_node_modules:

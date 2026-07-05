@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(Get-ChildItem -Path \"Y:\\\\AI_Projects\\\\project-athena\" -Force -Recurse -Depth 3 | Where-Object { $_.PSIsContainer -eq $false } | Select-Object FullName, Length)",
+      "PowerShell(Get-ChildItem -Recurse -File Y:\\\\AI_Projects\\\\project-athena\\\\frontend\\\\src | Where-Object { $_.LastWriteTime -gt \\(Get-Date\\).AddHours\\(-2\\) } | Select-Object -ExpandProperty FullName)",
+      "PowerShell(Get-ChildItem -Recurse -File Y:\\\\AI_Projects\\\\project-athena\\\\backend | Where-Object { $_.Extension -in '.py','.txt','.md','.yml','.yaml','.toml','.sql' } | Select-Object -ExpandProperty FullName)",
+      "PowerShell(Get-ChildItem -Recurse -File Y:\\\\AI_Projects\\\\project-athena\\\\frontend | Where-Object { $_.Extension -in '.js','.jsx','.ts','.tsx','.json','.css','.md' -and $_.FullName -notmatch 'node_modules' } | Select-Object -ExpandProperty FullName)",
+      "PowerShell(New-Item *)",
+      "PowerShell(Get-ChildItem -Recurse -File Y:\\\\AI_Projects\\\\project-athena\\\\docs | Sort-Object FullName | Select-Object FullName, @{N='Size';E={$_.Length}})",
+      "PowerShell(Get-ChildItem -Recurse Y:\\\\AI_Projects\\\\project-athena\\\\docs | Where-Object { -not $_.PSIsContainer } | ForEach-Object { '{0,5}  {1}' -f $_.Length, $_.FullName.Substring\\(\\($_.DirectoryName.Length + 1 - [Math]::Min\\($_.DirectoryName.Length + 1, 0\\)\\)\\) })",
+      "PowerShell(python --version; python -c \"import sys; print\\(sys.executable\\); print\\(sys.prefix\\)\")",
+      "PowerShell(Out-Null *)",
+      "PowerShell(& .venv\\\\Scripts\\\\Activate.ps1; if \\($?\\) { Write-Host \"active: $env:VIRTUAL_ENV\"; python --version } else { Write-Host 'activate failed' })",
+      "PowerShell(python C:\\\\Users\\\\yashr\\\\AppData\\\\Local\\\\Temp\\\\get-pip.py 2>&1 | Select-Object -Last 20)",
+      "PowerShell(& .venv\\\\Scripts\\\\Activate.ps1; .venv\\\\Scripts\\\\python.exe C:\\\\Users\\\\yashr\\\\AppData\\\\Local\\\\Temp\\\\get-pip.py 2>&1 | Select-Object -Last 5)",
+      "PowerShell(.venv\\\\Scripts\\\\pip.exe --version)",
+      "PowerShell(.venv\\\\Scripts\\\\pip.exe install --quiet 'passlib[bcrypt]' 2>&1 | Select-Object -Last 30)"
+    ]
+  }
+}

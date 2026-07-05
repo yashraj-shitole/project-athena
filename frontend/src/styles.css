@@ -1,0 +1,208 @@
+/* Athena — minimal app-wide styles */
+:root {
+  --bg: #0f172a;
+  --panel: #1e293b;
+  --panel-2: #273449;
+  --text: #e2e8f0;
+  --text-dim: #94a3b8;
+  --accent: #38bdf8;
+  --accent-strong: #0ea5e9;
+  --border: #334155;
+  --danger: #f87171;
+  --ok: #4ade80;
+}
+
+* { box-sizing: border-box; }
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+}
+
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+button {
+  background: var(--accent-strong);
+  color: white;
+  border: none;
+  border-radius: 6px;
+  padding: 8px 14px;
+  cursor: pointer;
+  font-size: 14px;
+}
+button:hover { background: var(--accent); }
+button:disabled { opacity: 0.6; cursor: not-allowed; }
+button.secondary {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text);
+}
+button.danger { background: var(--danger); }
+
+input, textarea, select {
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-size: 14px;
+  font-family: inherit;
+}
+input:focus, textarea:focus, select:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.app-shell {
+  display: grid;
+  grid-template-columns: 280px 1fr;
+  grid-template-rows: 100vh;   /* lock the row to viewport so a tall
+                                  sidebar can't push .main's composer
+                                  below the fold. */
+  height: 100vh;
+  overflow: hidden;
+}
+.sidebar {
+  background: var(--panel);
+  border-right: 1px solid var(--border);
+  padding: 16px;
+  overflow-y: auto;
+  min-height: 0;   /* let it shrink in the grid track */
+}
+.main {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;   /* let .main shrink inside the grid track */
+  overflow: hidden;
+}
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+  flex: 0 0 auto;       /* never compress, always full width */
+}
+.content { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 16px; }
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 16px;
+  margin-bottom: 12px;
+}
+
+.auth-page {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100vh;
+}
+.auth-card {
+  width: 360px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 24px;
+}
+.auth-card h1 { margin-top: 0; }
+.auth-card label { display: block; margin-top: 12px; font-size: 13px; color: var(--text-dim); }
+.auth-card input { width: 100%; margin-top: 4px; }
+.auth-card .actions { margin-top: 16px; display: flex; justify-content: space-between; align-items: center; }
+.auth-card .err { color: var(--danger); margin-top: 8px; font-size: 13px; }
+
+.chat {
+  display: flex;
+  flex-direction: column;
+  flex: 1;             /* fill .main below the topbar */
+  min-height: 0;       /* allow flex children to shrink and scroll */
+  overflow: hidden;
+}
+.chat .messages {
+  flex: 1 1 auto;
+  min-height: 0;       /* the flex item that actually scrolls */
+  overflow-y: auto;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.bubble {
+  max-width: 80%;
+  padding: 10px 14px;
+  border-radius: 10px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.bubble.user { align-self: flex-end; background: var(--accent-strong); border-color: transparent; }
+.bubble.assistant { align-self: flex-start; }
+.bubble.tool { align-self: flex-start; font-size: 12px; color: var(--text-dim); }
+.citation { font-size: 12px; color: var(--text-dim); margin-top: 4px; }
+
+.composer {
+  display: flex;
+  gap: 8px;
+  padding: 12px;
+  border-top: 1px solid var(--border);
+  background: var(--panel);
+  flex: 0 0 auto;       /* always visible at the bottom */
+}
+.composer textarea { flex: 1; resize: none; min-height: 40px; max-height: 200px; }
+
+.docs-list { display: flex; flex-direction: column; gap: 8px; }
+.doc-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.status-pill {
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.status-uploaded   { background: #475569; color: #e2e8f0; }
+.status-processing { background: #ca8a04; color: #fff; }
+.status-indexed    { background: #16a34a; color: #fff; }
+.status-failed     { background: #dc2626; color: #fff; }
+
+/* Modal (delete confirmation, etc.) */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+.modal {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 20px;
+  width: 360px;
+  max-width: 90vw;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
+}
+.modal h3 { margin-top: 0; }
+.modal .actions {
+  margin-top: 16px;
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}

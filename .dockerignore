@@ -1,0 +1,42 @@
+# VCS / IDE / OS
+.git
+.gitignore
+.idea
+.vscode
+.DS_Store
+Thumbs.db
+
+# Python
+**/__pycache__
+**/*.pyc
+**/*.pyo
+**/*.pyd
+**/*.egg-info
+.venv
+venv
+env
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.coverage
+htmlcov
+backend/storage
+
+# Node
+node_modules
+**/node_modules
+dist
+.vite
+*.log
+
+# This file and the Dockerfile itself
+Dockerfile
+.dockerignore
+
+# Documentation (not needed in containers)
+docs/
+*.md
+
+# Local env files
+.env
+.env.*
