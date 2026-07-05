@@ -1,5 +1,11 @@
 # Testing
 
+> **One-command:** `.\test.ps1` runs every suite inside the Docker containers
+> (no local venv needed). See
+> [development/DeveloperScripts.md](development/DeveloperScripts.md) for all
+> flags (`-Backend`, `-Integration`, `-Coverage`, `-CI`, …). The details below
+> describe what the runner executes under the hood.
+
 The backend ships with two test tiers:
 
 - **Unit tests** — fast, hermetic, no external services. Run by default.

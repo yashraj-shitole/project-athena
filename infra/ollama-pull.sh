@@ -1,5 +1,5 @@
 #!/bin/sh
-# Project Athena — one-shot LLM model pull.
+# Project Athena  -  one-shot LLM model pull.
 #
 # This script is mounted into a one-shot init container that shares the
 # `ollama_data` volume with the long-lived `ollama` service. We wait for

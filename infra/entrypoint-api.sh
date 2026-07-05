@@ -1,7 +1,9 @@
 #!/bin/sh
-# Entrypoint for the API container. Runs as root to fix ownership on
-# the (potentially root-owned) api_storage volume, then drops to the
-# unprivileged `athena` user to start uvicorn.
+# Entrypoint for the API container. The image's USER is `athena` (uid
+# non-root) for the actual process, but Docker mounts named volumes as
+# root by default, so the storage tree can be root-owned on first boot.
+# This entrypoint fixes ownership on the storage volume (which requires
+# root), then drops back to the unprivileged `athena` user to run uvicorn.
 set -eu
 
 STORAGE_DIR="${ATHENA_STORAGE_DIR:-/app/storage}"
@@ -16,5 +18,16 @@ else
     chown -R athena:athena "$STORAGE_DIR"
 fi
 
-# Run the CMD as athena. exec so the shell is replaced.
-exec gosu athena "$@"
+# If we're already running as the athena user (e.g. the orchestrator
+# invoked us with --user athena), skip the re-exec  -  gosu would refuse to
+# drop to the same uid and there's nothing to drop.
+CURRENT_UID="$(id -u 2>/dev/null || echo 0)"
+if [ "$CURRENT_UID" = "0" ]; then
+    if ! command -v gosu >/dev/null 2>&1; then
+        echo "entrypoint: running as root but 'gosu' is not installed; refusing to start uvicorn as root" >&2
+        exit 1
+    fi
+    exec gosu athena "$@"
+else
+    exec "$@"
+fi

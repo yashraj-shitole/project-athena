@@ -25,7 +25,16 @@ export const authService = {
     setTokens(data.access_token, data.refresh_token);
     return data;
   },
-  logout() {
+  async logout() {
+    // Best-effort server-side revocation: bump token_version so all
+    // outstanding access/refresh tokens fail the `ver` check. We clear
+    // locally regardless of whether the call succeeds — if the token is
+    // already expired/invalid we still want the client logged out.
+    try {
+      await apiClient.post('/auth/logout', {});
+    } catch {
+      // 401 here just means the token is already invalid — ignore.
+    }
     clearTokens();
   },
 };

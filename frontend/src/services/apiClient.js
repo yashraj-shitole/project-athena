@@ -98,8 +98,12 @@ async function _readError(res) {
 
 function _timeoutSignal(ms) {
   const ctrl = new AbortController();
-  setTimeout(() => ctrl.abort(), ms);
-  return ctrl.signal;
+  // Hold the timer id so the caller can clear it once the fetch settles.
+  // Without clearing, the timer (and the AbortController it closes over)
+  // lives until the full timeout elapses even on a fast 200 — a leak that
+  // adds up across many requests.
+  const timer = setTimeout(() => ctrl.abort(), ms);
+  return { signal: ctrl.signal, clear: () => clearTimeout(timer) };
 }
 
 async function request(path, opts = {}) {
@@ -113,7 +117,8 @@ async function request(path, opts = {}) {
   const token = getToken();
   if (token) headers.Authorization = `Bearer ${token}`;
 
-  const signal = opts.signal || _timeoutSignal(opts.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+  const owned = opts.signal ? null : _timeoutSignal(opts.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+  const signal = opts.signal || owned.signal;
 
   let res;
   try {
@@ -130,6 +135,8 @@ async function request(path, opts = {}) {
     err.status = 0;
     err.cause = e;
     throw err;
+  } finally {
+    if (owned) owned.clear();
   }
 
   if (res.status === 401) {
@@ -161,7 +168,8 @@ export const apiClient = {
     const headers = { ...(opts.headers || {}) };
     const token = getToken();
     if (token) headers.Authorization = `Bearer ${token}`;
-    const signal = opts.signal || _timeoutSignal(opts.timeoutMs ?? 5 * 60_000);
+    const owned = opts.signal ? null : _timeoutSignal(opts.timeoutMs ?? 5 * 60_000);
+    const signal = opts.signal || owned.signal;
 
     let res;
     try {
@@ -177,6 +185,8 @@ export const apiClient = {
       err.status = 0;
       err.cause = e;
       throw err;
+    } finally {
+      if (owned) owned.clear();
     }
     if (res.status === 401) {
       _handle401('upload');
@@ -193,17 +203,36 @@ export const apiClient = {
    * Open a streaming POST. Returns the raw Response so the caller can
    * iterate over SSE events. Caller is responsible for cancellation
    * via the `signal` option.
+   *
+   * Unlike a normal request, the SSE consumer reads `res.body` directly,
+   * so a 401 here would otherwise surface as a malformed-stream parse
+   * error. Detect 401 up front and route it through the same auth-failed
+   * path as `request()`.
    */
-  stream(path, body, opts = {}) {
+  async stream(path, body, opts = {}) {
     const headers = { 'Content-Type': 'application/json', ...(opts.headers || {}) };
     const token = getToken();
     if (token) headers.Authorization = `Bearer ${token}`;
-    return fetch(`${BASE}${path}`, {
+    const res = await fetch(`${BASE}${path}`, {
       method: 'POST',
       body: JSON.stringify(body),
       headers,
       signal: opts.signal,
     });
+    if (res.status === 401) {
+      // Drain so the connection can be reused, then route to auth-failed.
+      try { await res.text(); } catch { /* ignore */ }
+      _handle401('stream');
+      const err = new Error('unauthorized');
+      err.status = 401;
+      throw err;
+    }
+    if (!res.ok) {
+      // Surface non-SSE error bodies (e.g. 413/500) as readable errors.
+      const err = await _readError(res).catch(() => new Error(`HTTP ${res.status}`));
+      throw err;
+    }
+    return res;
   },
 };
 

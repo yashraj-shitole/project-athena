@@ -187,7 +187,7 @@ async def _run_ingest(doc_id: uuid.UUID, user_id: uuid.UUID, storage_path: str) 
                     .values(status="failed", error_message=str(exc)[:500])
                 )
                 await session.commit()
-        except Exception: as exc2:  # noqa: BLE001
+        except Exception as exc2:  # noqa: BLE001
             log.error("ingest.background.mark_failed", doc_id=str(doc_id), error=str(exc2))
 
 

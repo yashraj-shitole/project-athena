@@ -63,6 +63,33 @@ project-athena/
 └── docs/                    design and reference docs
 ```
 
+## Developer scripts (one-command)
+
+The repo root and `goThrough/` contain a cross-platform automation layer that
+wraps Docker Compose with env validation, health waits, and colored output.
+Windows PowerShell 7+ is the primary interface; `build.sh` / `docker-up.sh`
+/ `test.sh` are the macOS/Linux equivalents.
+
+```powershell
+.\build.ps1                 # build all images (validates env, ensures network/volumes)
+.\docker-up.ps1             # run the stack            -> http://localhost:8080
+.\docker-up.ps1 -Debug      # hot reload + debugger    -> :8000 / :5678 / :5173
+.\docker-up.ps1 -Debug -Watch
+.\test.ps1                  # all tests (run inside containers)
+.\debug-all.ps1             # full stack in debug mode
+.\health.ps1                # verify services + DB + API endpoints
+.\reset.ps1 -Volumes        # wipe and start over
+```
+
+Service aliases: `backend`→`api`, `frontend`→`nginx` (prod) / `web-dev` (HMR),
+`db`→`postgres`, `llm`→`ollama`. The spec's "ai-service" / "worker" are folded
+into `api` (orchestrator + ingestion run there); their build aliases build the
+`api` target.
+
+See [`docs/development/DeveloperScripts.md`](docs/development/DeveloperScripts.md)
+for every script, all flags, the debugging/testing workflows, and a
+troubleshooting guide. Copy `.env.example` to `.env` to override defaults.
+
 ## Quick start (local Docker)
 
 ```bash

@@ -156,7 +156,12 @@ async def call_tool(
     except json.JSONDecodeError as exc:
         raise MCPError(f"mcp returned non-JSON: {exc}") from exc
 
-    if body.get("error"):
+    # JSON-RPC responses must be objects. A list/string/null body would
+    # otherwise raise AttributeError on `.get` and surface as a 500.
+    if not isinstance(body, dict):
+        raise MCPError(f"mcp returned non-object response: {type(body).__name__}")
+
+    if body.get("error") is not None:
         raise MCPError(f"mcp error: {body['error']}")
 
     result = body.get("result") or {}

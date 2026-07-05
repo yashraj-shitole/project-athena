@@ -11,12 +11,15 @@ from app.schemas.base import ORMModelBase
 
 class UserCreate(ORMModelBase):
     email: EmailStr
-    password: str = Field(min_length=8, max_length=128)
+    # bcrypt silently truncates inputs to 72 bytes, so two distinct long
+    # passwords would hash to the same value. Cap at 72 to make the limit
+    # explicit and reject collisions at the boundary instead.
+    password: str = Field(min_length=8, max_length=72)
 
 
 class UserLogin(ORMModelBase):
     email: EmailStr
-    password: str
+    password: str = Field(min_length=1, max_length=72)
 
 
 class UserPublic(ORMModelBase):

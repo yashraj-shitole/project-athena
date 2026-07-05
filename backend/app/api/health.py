@@ -6,6 +6,7 @@ import time
 from fastapi import APIRouter
 from sqlalchemy import text
 
+from app.api.dependencies import AdminUser
 from app.core.cache import HITS, MISSES, get_client
 from app.core.config import get_settings
 from app.core.logging import get_logger
@@ -80,8 +81,13 @@ async def active_model() -> dict:
 
 
 @router.get("/metrics")
-async def metrics() -> dict:
-    """FR-36: cache hit/miss counters (best-effort; Redis may be down)."""
+async def metrics(_admin: AdminUser) -> dict:
+    """FR-36: cache hit/miss counters (best-effort; Redis may be down).
+
+    Admin-gated: the counters and any future operational internals here
+    are not for unauthenticated callers. `/health` (liveness) stays open;
+    `/metrics` does not.
+    """
     out: dict[str, int] = {"hits": 0, "misses": 0}
     try:
         c = get_client()

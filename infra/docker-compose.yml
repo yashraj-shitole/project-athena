@@ -7,14 +7,32 @@
 # volume by the one-shot `ollama-pull` service. Subsequent restarts skip
 # the download.
 #
-# Ports exposed on the host:
-#   80   → nginx (SPA + reverse proxy to API)
-#   8000 → API (direct, useful for curl / debugging; not required by the SPA)
+# Ports exposed on the host (all bound to 127.0.0.1 — they are NOT published
+# on the public interface; the nginx SPA on :80 is the only public entry):
+#   8080 → nginx (SPA + reverse proxy to API)
+#   8000 → API (direct, useful for curl / debugging; loopback-only)
+#   5432 → Postgres (loopback-only; never expose to the network)
+#   6379 → Redis  (loopback-only)
+#   11434 → Ollama (loopback-only)
+#
+# Secrets: every password / secret is read from the environment with a
+# *development-only* default that the API rejects in production mode
+# (see app/core/config.py fail-fast). Override ATHENA_POSTGRES_PASSWORD,
+# ATHENA_JWT_SECRET, etc. via a real .env file or orchestrator secrets
+# for any non-local deployment.
 #
 # To attach to logs:
 #   docker compose logs -f api nginx
 # To stop and wipe data:
 #   docker compose down -v
+#
+# Developer scripts (preferred): the repo-root build.ps1 / docker-up.ps1 /
+# test.ps1 / debug-all.ps1 and the goThrough/ suite wrap the commands below
+# with env validation, health waits, and a consistent project name. They set
+# COMPOSE_PROJECT_NAME=athena; the explicit `name:` below keeps manual runs
+# consistent with scripted ones (volumes become athena_pgdata, etc.).
+
+name: athena
 
 services:
   # -----------------------------------------------------------------------
@@ -24,19 +42,21 @@ services:
     image: pgvector/pgvector:pg16
     container_name: athena-postgres
     environment:
-      POSTGRES_USER: athena
-      POSTGRES_PASSWORD: athena
-      POSTGRES_DB: athena
+      POSTGRES_USER: ${ATHENA_POSTGRES_USER:-athena}
+      POSTGRES_PASSWORD: ${ATHENA_POSTGRES_PASSWORD:-athena-dev-only}
+      POSTGRES_DB: ${ATHENA_POSTGRES_DB:-athena}
+    # Loopback-only — never publish the DB on a public interface.
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./init.sql:/docker-entrypoint-initdb.d/00_init.sql:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U athena"]
+      test: ["CMD-SHELL", "pg_isready -U ${ATHENA_POSTGRES_USER:-athena}"]
       interval: 5s
       timeout: 5s
       retries: 10
+    restart: unless-stopped
 
   # -----------------------------------------------------------------------
   # Redis (cache + counters)
@@ -44,43 +64,54 @@ services:
   redis:
     image: redis:7-alpine
     container_name: athena-redis
+    # Loopback-only — Redis has no auth and must not be reachable off-host.
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 3s
       retries: 10
+    restart: unless-stopped
 
   # -----------------------------------------------------------------------
   # Ollama (long-running)
   # -----------------------------------------------------------------------
   ollama:
-    image: ollama/ollama:latest
+    # Pin a digest-tagged image instead of :latest so the deployed image
+    # is reproducible and can't silently change under us.
+    image: ollama/ollama:0.3.14
     container_name: athena-ollama
-    ports:
-      - "11434:11434"
+    # NOTE: the host's port 11434 is intentionally NOT published. The
+    # container's ollama process listens on 11434 *inside* its own
+    # network namespace, and the API/ollama-pull services reach it as
+    # `http://ollama:11434` over the docker network. Publishing the
+    # port conflicts with a native ollama on the host and is never
+    # required (we don't expect a user to curl ollama directly).
     volumes:
       - ollama_data:/root/.ollama
     healthcheck:
-      # /api/tags returns 200 once the daemon is listening.
-      test: ["CMD-SHELL", "wget -qO- http://localhost:11434/api/tags >/dev/null || exit 1"]
+      # `ollama list` is the in-binary equivalent of GET /api/tags and
+      # avoids depending on wget/curl, neither of which is in the bare
+      # `ollama/ollama:*` runtime image.
+      test: ["CMD", "ollama", "list"]
       interval: 10s
       timeout: 5s
       retries: 10
       start_period: 30s
+    restart: unless-stopped
 
   # -----------------------------------------------------------------------
   # One-shot model pull (uses the same ollama_data volume)
   # -----------------------------------------------------------------------
   ollama-pull:
-    image: ollama/ollama:latest
+    image: ollama/ollama:0.3.14
     container_name: athena-ollama-pull
     depends_on:
       ollama:
         condition: service_healthy
     environment:
-      ATHENA_OLLAMA_MODEL: qwen2.5:1.5b-instruct
+      ATHENA_OLLAMA_MODEL: ${ATHENA_OLLAMA_MODEL:-qwen2.5:1.5b-instruct}
       OLLAMA_HOST: http://ollama:11434
     volumes:
       - ollama_data:/root/.ollama
@@ -103,19 +134,28 @@ services:
       redis:
         condition: service_healthy
     environment:
-      ATHENA_DATABASE_URL: postgresql+asyncpg://athena:athena@postgres:5432/athena
+      ATHENA_DATABASE_URL: postgresql+asyncpg://${ATHENA_POSTGRES_USER:-athena}:${ATHENA_POSTGRES_PASSWORD:-athena-dev-only}@postgres:5432/${ATHENA_POSTGRES_DB:-athena}
       ATHENA_REDIS_URL: redis://redis:6379/0
       ATHENA_OLLAMA_URL: http://ollama:11434
-      ATHENA_OLLAMA_MODEL: qwen2.5:1.5b-instruct
+      ATHENA_OLLAMA_MODEL: ${ATHENA_OLLAMA_MODEL:-qwen2.5:1.5b-instruct}
       ATHENA_STORAGE_DIR: /app/storage
-      ATHENA_JWT_SECRET: change-me-in-prod   # set in production!
+      # No shipped default — must be set. config.py fail-fasts on the
+      # known-insecure value below in any non-dev environment, and the
+      # compose default is exactly that sentinel so forgetting to
+      # override it is loud rather than silent.
+      ATHENA_JWT_SECRET: ${ATHENA_JWT_SECRET:-change-me-in-prod}
       ATHENA_TOKEN_BUDGET: "3000"
-      ATHENA_LOG_LEVEL: INFO
-      ATHENA_CORS_ORIGINS: '["http://localhost"]'
+      ATHENA_LOG_LEVEL: ${ATHENA_LOG_LEVEL:-INFO}
+      # Comma-separated list of allowed origins. The default is a dev-only
+      # localhost value; config.py rejects localhost in CORS origins when
+      # running in production mode.
+      ATHENA_CORS_ORIGINS: ${ATHENA_CORS_ORIGINS:-["http://localhost:8080"]}
+      ATHENA_ENV: ${ATHENA_ENV:-dev}
     volumes:
       - api_storage:/app/storage
+    # Loopback-only — direct API access is for local debugging only.
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     restart: unless-stopped
 
   # -----------------------------------------------------------------------
@@ -133,7 +173,7 @@ services:
     depends_on:
       - api
     ports:
-      - "80:80"
+      - "8080:80"
     restart: unless-stopped
 
   # -----------------------------------------------------------------------

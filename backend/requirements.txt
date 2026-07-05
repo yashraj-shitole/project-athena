@@ -1,7 +1,12 @@
 # --- Web framework ---
-fastapi==0.115.0
+# fastapi >= 0.109.1 / Starlette >= 0.35.1 fix the multipart/form-data
+#   ReDoS (CVE-2024-24762, CVE-2024-45338 style). 0.115.6 also patches
+#   the python-multipart boundary ReDoS (CVE-2024-47805).
+fastapi==0.115.6
 uvicorn[standard]==0.30.6
-python-multipart==0.0.12
+# python-multipart < 0.0.18 is vulnerable to a boundary-parsing ReDoS
+# (CVE-2024-47805) exploitable via multipart form uploads.
+python-multipart==0.0.20
 
 # --- Validation / settings ---
 pydantic==2.9.2

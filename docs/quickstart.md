@@ -2,6 +2,13 @@
 
 This walks you from a clean checkout to a running app on `localhost`.
 
+> **Prefer the scripts.** The repo-root automation layer does everything below
+> in one command, with env validation and health waits:
+> `.\build.ps1 ; .\docker-up.ps1` (PowerShell) or `./build.sh && ./docker-up.sh`
+> (bash). See [development/DeveloperScripts.md](development/DeveloperScripts.md)
+> for the full surface. The manual steps below remain useful for understanding
+> what the scripts do, and for the local-backend (Option B/C) workflows.
+
 ## Prerequisites
 
 | Tool   | Version | Notes |
@@ -20,7 +27,7 @@ SPA) in one command. The Ollama model is pulled automatically on first boot.
 docker compose -f infra/docker-compose.yml up -d --build
 ```
 
-Then open <http://localhost>.
+Then open <http://localhost:8080>.
 
 The first start takes a few minutes (it pulls Docker images, the Python
 deps, the embedding model, and `qwen2.5:1.5b-instruct`). Subsequent starts
@@ -29,7 +36,7 @@ are near-instant.
 To check it's up:
 
 ```bash
-curl -fsS http://localhost/health
+curl -fsS http://localhost:8080/health
 # → {"status":"ok","checks":{"db":{"ok":true,...},...}}
 ```
 
@@ -81,30 +88,30 @@ Then run the backend / frontend as in Option B.
 ## Smoke test
 
 The base URL depends on the option you chose:
-- **Option A (Docker stack):** `http://localhost` (nginx serves the SPA and reverse-proxies the API)
+- **Option A (Docker stack):** `http://localhost:8080` (nginx serves the SPA and reverse-proxies the API)
 - **Option B / C (local):** `http://localhost:8000` for the API, `http://localhost:5173` for the SPA
 
 ```bash
 # Register a user
-curl -X POST http://localhost/api/auth/register \
+curl -X POST http://localhost:8080/api/auth/register \
   -H "Content-Type: application/json" \
   -d '{"email":"test@example.com","password":"hunter222"}'
 
 # Log in
-curl -X POST http://localhost/api/auth/login-json \
+curl -X POST http://localhost:8080/api/auth/login-json \
   -H "Content-Type: application/json" \
   -d '{"email":"test@example.com","password":"hunter222"}'
 
 # Upload a file (use the access_token from the login response)
 TOKEN="<paste access_token here>"
-curl -X POST http://localhost/api/documents \
+curl -X POST http://localhost:8080/api/documents \
   -H "Authorization: Bearer $TOKEN" \
   -F "file=@./README.md"
 
 # Ops endpoints
-curl http://localhost/health
-curl http://localhost/model
-curl http://localhost/metrics
+curl http://localhost:8080/health
+curl http://localhost:8080/model
+curl http://localhost:8080/metrics
 ```
 
 ## Common pitfalls

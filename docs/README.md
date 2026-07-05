@@ -37,6 +37,7 @@ Phase 1 MVP — functional. All FR-01…39 functional requirements are implement
 | You want to … | Read |
 |---|---|
 | Run it locally | [quickstart.md](quickstart.md) |
+| Use the build / debug / test scripts | [development/DeveloperScripts.md](development/DeveloperScripts.md) |
 | Understand the API | [api.md](api.md) |
 | Understand the LLM orchestration | [architecture/orchestrator.md](architecture/orchestrator.md) |
 | Understand retrieval (BM25 + vector + RRF) | [architecture/retrieval.md](architecture/retrieval.md) |

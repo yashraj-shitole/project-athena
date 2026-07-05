@@ -124,6 +124,16 @@ async def _execute_tool_call(
 ) -> tuple[dict, str, dict | None]:
     """Returns: (result_dict, status, tool_row_dict_for_audit)."""
     args = coerce_arguments(raw_args)
+    if args is None and raw_args is not None:
+        # The LLM emitted arguments that are not a JSON object and cannot
+        # be coerced into one (e.g. a bare string or malformed JSON). Treat
+        # this as invalid so the corrective-retry / deterministic-fallback
+        # path engages, rather than silently calling the tool with {}.
+        return (
+            {"error": "invalid_args: arguments must be a JSON object"},
+            "error",
+            None,
+        )
 
     tool_row = await tool_registry.get_by_name(session, tool_name)
     if tool_row is None:

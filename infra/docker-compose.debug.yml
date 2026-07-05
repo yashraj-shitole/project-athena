@@ -1,0 +1,95 @@
+# Project Athena — debug override.
+#
+# Use on top of the base file:
+#   docker compose -f infra/docker-compose.yml -f infra/docker-compose.debug.yml up
+# or via the scripts:
+#   ./docker-up.ps1 -Debug           # full stack, debug profile
+#   ./docker-up.ps1 -Debug -Watch    # + follow logs
+#   ./debug-all.ps1
+#
+# What this override enables:
+#   - Backend hot reload: uvicorn --reload watching /app/backend/app; the host
+#     backend/ source is bind-mounted over the image's copy so edits on the
+#     host are picked up without a rebuild.
+#   - Backend debugger: debugpy listens on 127.0.0.1:5678 (attach-anytime; it
+#     does NOT block waiting for a client, so the server runs normally even
+#     when no debugger is attached). debugpy is installed lazily on first
+#     start (it is not a production dependency, so it isn't pinned in
+#     requirements.txt).
+#   - Frontend HMR: the web-dev service (profile `dev`) is started because the
+#     scripts pass `--profile dev` in debug mode. The manual equivalent is:
+#       docker compose --profile dev -f infra/docker-compose.yml -f infra/docker-compose.debug.yml up
+#     (A plain `up` without --profile dev would NOT start web-dev — it stays
+#     in the dev profile from the base file. We do not override `profiles`
+#     here, because Compose's `profiles: []` does NOT clear the base list, and
+#     the `!reset` tag needs Compose v2.20+ which we don't want to require.)
+#     Vite serves sourcemaps in dev by default.
+#   - Optional Node inspector on 127.0.0.1:9229 (for debugging Vite itself).
+#   - Verbose structured logging + SQL echo.
+#
+# Data preservation: pgdata, ollama_data, api_storage and webdev_node_modules
+# are the same named volumes as the base file, so toggling debug mode never
+# wipes your database, pulled model, or uploaded files.
+
+services:
+  # -----------------------------------------------------------------------
+  # api — hot reload + debugpy attach
+  # -----------------------------------------------------------------------
+  api:
+    environment:
+      ATHENA_DEBUG: "true"
+      ATHENA_LOG_LEVEL: "DEBUG"
+      ATHENA_DB_ECHO: "true"
+      # Make Python tracebacks point at the mounted (host) source so the
+      # debugger maps frames to the files you actually edit.
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONUNBUFFERED: "1"
+      PYTHONPATH: "/app/backend"
+    volumes:
+      # Bind-mount the host backend source over the image copy. Deps stay in
+      # the image (site-packages); only source files are shadowed, so
+      # editing app/** hot-reloads without rebuilding.
+      - ../backend:/app/backend
+      - api_storage:/app/storage
+    ports:
+      - "127.0.0.1:8000:8000"
+      # debugpy — attach with VS Code / pydbg to localhost:5678.
+      - "127.0.0.1:5678:5678"
+    # Install debugpy lazily (skip if already importable) then run uvicorn
+    # under debugpy with --reload. The entrypoint still drops to the non-root
+    # `athena` user; pip --user installs into /home/athena/.local which is on
+    # the user's sys.path, so `python -m debugpy` resolves after install.
+    command:
+      - sh
+      - -lc
+      - >
+        python -c 'import debugpy' 2>/dev/null
+        || pip install --user --no-cache-dir debugpy;
+        exec python -m debugpy --listen 0.0.0.0:5678
+        -m uvicorn main:app
+        --host 0.0.0.0 --port 8000
+        --reload --reload-dir /app/backend/app
+
+  # -----------------------------------------------------------------------
+  # web-dev — promote out of the dev profile so `up` brings it up; add the
+  # Node inspector port for debugging Vite. HMR + sourcemaps are Vite defaults.
+  # -----------------------------------------------------------------------
+  web-dev:
+    # Stays in the `dev` profile from the base file; started via --profile dev
+    # (see header). HMR + sourcemaps are Vite dev defaults.
+    environment:
+      VITE_API_TARGET: http://localhost:8000
+    ports:
+      - "5173:5173"
+      - "127.0.0.1:9229:9229"   # optional node --inspect for the Vite process
+    volumes:
+      - ../frontend:/app
+      - webdev_node_modules:/app/node_modules
+
+  # -----------------------------------------------------------------------
+  # nginx — keep the production SPA reachable on :8080 in debug too, so the
+  # `-Services frontend` selector can target the built SPA without HMR.
+  # -----------------------------------------------------------------------
+  nginx:
+    ports:
+      - "8080:80"

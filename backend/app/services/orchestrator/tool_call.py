@@ -112,7 +112,13 @@ def fallback_keywords(message: str, top_k: int = 6) -> list[str]:
 
 
 def coerce_arguments(raw: Any) -> dict | None:
-    """Normalize whatever the LLM gave us into a dict (or None)."""
+    """Normalize whatever the LLM gave us into a dict (or None).
+
+    Returns None when the input is not a JSON object (dict) and cannot be
+    parsed as one — a non-JSON string is malformed tool arguments and must
+    not be passed through as a synthetic dict, because that would bypass
+    schema validation and reach the tool handler with arbitrary shape.
+    """
     if raw is None:
         return None
     if isinstance(raw, dict):
@@ -123,12 +129,15 @@ def coerce_arguments(raw: Any) -> dict | None:
             return None
         try:
             parsed = json.loads(s)
-            if isinstance(parsed, dict):
-                return parsed
-            return {"value": parsed}
         except json.JSONDecodeError:
-            return {"_raw": s[:500]}
-    return {"value": str(raw)[:500]}
+            # Malformed JSON arguments → reject (None), do not pass through.
+            return None
+        if isinstance(parsed, dict):
+            return parsed
+        # A bare JSON scalar/array is not a valid kwargs dict → reject.
+        return None
+    # Numbers, lists, etc. are not a kwargs dict → reject.
+    return None
 
 
 def build_corrective_note(tool_name: str, error: str) -> str:
