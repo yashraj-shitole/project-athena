@@ -1,6 +1,7 @@
 import React from 'react';
 import { Navigate, Route, Routes, useLocation } from 'react-router-dom';
 import ChatInterface from './pages/ChatInterface.jsx';
+import DocumentDetail from './pages/DocumentDetail.jsx';
 import DocumentManager from './pages/DocumentManager.jsx';
 import Login from './pages/Login.jsx';
 import { useAuth } from './hooks/useAuth.js';
@@ -69,6 +70,14 @@ function App() {
         element={
           <Protected>
             <ChatInterface />
+          </Protected>
+        }
+      />
+      <Route
+        path="/documents/:id"
+        element={
+          <Protected>
+            <DocumentDetail />
           </Protected>
         }
       />

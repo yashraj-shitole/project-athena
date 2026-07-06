@@ -2,8 +2,13 @@ import React, { useEffect, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useAuth } from '../hooks/useAuth.js';
 import docService from '../services/docService.js';
+import DocumentCard from '../components/DocumentCard.jsx';
 
 // Polling cadence. We only poll fast when something is in motion.
+// (The per-doc SSE stream drives the in-card progress UI; this list-
+// level poll keeps the row list in sync for new uploads and is the
+// fallback if a user is on a different replica from the one running
+// the pipeline.)
 const POLL_FAST_MS = 2000;
 const POLL_SLOW_MS = 15000;
 
@@ -221,35 +226,11 @@ export default function DocumentManager() {
           </p>
           <div className="docs-list">
             {visible.map((d) => (
-              <div className="doc-row" key={d.id}>
-                <div>
-                  <div style={{ fontWeight: 500 }}>{d.filename}</div>
-                  <div style={{ fontSize: 12, color: 'var(--text-dim)' }}>
-                    {d.file_type} · {(d.size_bytes / 1024).toFixed(1)} KB ·{' '}
-                    {d.page_count ? `${d.page_count} pages · ` : ''}
-                    {new Date(d.created_at).toLocaleString()}
-                    {d.error_message ? ` · error: ${d.error_message}` : ''}
-                  </div>
-                </div>
-                <div
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 8,
-                  }}
-                >
-                  <span className={`status-pill status-${d.status}`}>
-                    {d.status}
-                  </span>
-                  <button
-                    className="danger"
-                    onClick={() => setPendingDelete(d)}
-                    disabled={deletingId === d.id}
-                  >
-                    {deletingId === d.id ? 'Deleting…' : 'Delete'}
-                  </button>
-                </div>
-              </div>
+              <DocumentCard
+                key={d.id}
+                doc={d}
+                onDelete={(docArg) => setPendingDelete(docArg)}
+              />
             ))}
             {visible.length === 0 &&
               (loadedOnce ? (

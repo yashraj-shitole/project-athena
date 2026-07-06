@@ -294,6 +294,45 @@ export const apiClient = {
     }
     return res;
   },
+
+  /**
+   * Open a streaming GET. Returns the raw Response so the caller can
+   * iterate SSE events. Mirrors `stream()`'s 401 routing and uses the
+   * same per-call timeout handling as a normal GET.
+   */
+  eventsStream(path, opts = {}) {
+    const attempt = () => {
+      const headers = { Accept: 'text/event-stream', ...(opts.headers || {}) };
+      const token = getToken();
+      if (token) headers.Authorization = `Bearer ${token}`;
+      // Caller passes a signal for cancellation; we don't set a default
+      // timeout here because SSE streams are long-lived. The caller
+      // (the React hook) handles reconnect/backoff.
+      return fetch(`${BASE}${path}`, { method: 'GET', headers, signal: opts.signal });
+    };
+    return (async () => {
+      let res = await attempt();
+      if (res.status === 401) {
+        try { await res.text(); } catch { /* ignore */ }
+        const refreshed = await _handle401('eventsStream');
+        if (refreshed) res = await attempt();
+        if (res.status === 401) {
+          try { await res.text(); } catch { /* ignore */ }
+          const err = new Error('unauthorized');
+          err.status = 401;
+          throw err;
+        }
+      }
+      if (!res.ok) {
+        // For SSE consumers, a non-2xx here means the request itself
+        // failed (404 doc-not-found, 403, etc.) — we want the same
+        // readable error shape `stream()` provides.
+        const err = await _readError(res).catch(() => new Error(`HTTP ${res.status}`));
+        throw err;
+      }
+      return res;
+    })();
+  },
 };
 
 export default apiClient;

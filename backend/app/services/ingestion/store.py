@@ -8,6 +8,7 @@ This is the single I/O boundary for chunk writes. It:
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 from typing import Iterable, List, Sequence
 
 from sqlalchemy import delete
@@ -89,15 +90,75 @@ async def mark_document_status(
     session: AsyncSession,
     document: Document,
     status: str,
+    *,
     error_message: str | None = None,
     page_count: int | None = None,
+    chunk_count: int | None = None,
+    embedding_model: str | None = None,
+    current_stage: str | None = None,
+    stage_progress: dict | None = None,
+    started_at: datetime | None = None,
+    processed_at: datetime | None = None,
+    processing_time_ms: int | None = None,
 ) -> None:
-    """Update a document row's lifecycle status. Reusable for any state change."""
+    """Update a document row's lifecycle status (and any side metadata).
+
+    All extra fields are keyword-only and default-None so this stays
+    drop-in compatible with the call sites that previously passed just
+    `(session, document, status)`. `None` means "leave alone" — a
+    non-None value overwrites the column. `stage_progress` is a dict
+    that replaces the JSONB column wholesale (callers pass the
+    full per-stage map, not a diff).
+    """
     document.status = status
     if error_message is not None:
         document.error_message = error_message
     if page_count is not None:
         document.page_count = page_count
+    if chunk_count is not None:
+        document.chunk_count = chunk_count
+    if embedding_model is not None:
+        document.embedding_model = embedding_model
+    if current_stage is not None:
+        document.current_stage = current_stage
+    if stage_progress is not None:
+        document.stage_progress = stage_progress
+    if started_at is not None:
+        document.started_at = started_at
+    if processed_at is not None:
+        document.processed_at = processed_at
+    if processing_time_ms is not None:
+        document.processing_time_ms = processing_time_ms
+    await session.flush()
+
+
+async def mark_document_progress(
+    session: AsyncSession,
+    document: Document,
+    *,
+    current_stage: str,
+    stage_progress: dict,
+    chunk_count: int | None = None,
+    page_count: int | None = None,
+    started_at: datetime | None = None,
+) -> None:
+    """Update only the mid-pipeline progress fields.
+
+    Unlike `mark_document_status`, this NEVER changes `status` — the
+    doc stays in `processing` (or whatever it was) while we tick the
+    stage and percentage columns. `stage_progress` replaces the column
+    wholesale (it's a small dict). `chunk_count`/`page_count` are
+    accepted as a convenience for the moments they become known mid-
+    pipeline.
+    """
+    document.current_stage = current_stage
+    document.stage_progress = stage_progress
+    if chunk_count is not None:
+        document.chunk_count = chunk_count
+    if page_count is not None:
+        document.page_count = page_count
+    if started_at is not None:
+        document.started_at = started_at
     await session.flush()
 
 

@@ -57,7 +57,10 @@ class Settings(BaseSettings):
     storage_dir: Path = Path("./storage")
     upload_max_bytes: int = 25 * 1024 * 1024  # 25MB default
     upload_allowed_types: List[str] = Field(
-        default_factory=lambda: ["csv", "xlsx", "pdf", "doc", "docx"]
+        default_factory=lambda: [
+            "csv", "xlsx", "pdf", "doc", "docx",
+            "txt", "md", "html", "htm",
+        ]
     )
 
     # ---- Ingestion ----

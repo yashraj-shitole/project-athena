@@ -12,6 +12,24 @@ export const docService = {
   get(id, opts = {}) {
     return apiClient.get(`/documents/${id}`, opts);
   },
+  chunks(id, opts = {}) {
+    return apiClient.get(`/documents/${id}/chunks`, opts);
+  },
+  /**
+   * Open a live SSE stream of status events for a single document.
+   * Returns the raw Response so the caller can iterate the body.
+   * Caller is responsible for cancellation via the `signal` option.
+   */
+  eventsStream(id, opts = {}) {
+    return apiClient.eventsStream(`/documents/${id}/events`, opts);
+  },
+  /**
+   * Ask the server to re-run ingestion for a failed/stuck document.
+   * Returns the updated Document row (status='processing').
+   */
+  retry(id, opts = {}) {
+    return apiClient.post(`/documents/${id}/retry`, undefined, opts);
+  },
   upload(file, opts = {}) {
     const fd = new FormData();
     fd.append('file', file);

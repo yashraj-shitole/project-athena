@@ -80,6 +80,11 @@ class LLMClient:
         real failure to the caller.
         """
         opts = options or _build_options()
+        # TEMP DEBUG: log the prompt we're about to send + the response.
+        try:
+            log.info("llm.debug.prompt", messages=messages, tools=bool(tools))
+        except Exception:
+            pass
         data = await self._client.chat(
             messages,
             tools=tools or None,
@@ -89,6 +94,10 @@ class LLMClient:
 
         message = (data or {}).get("message") or {}
         text = message.get("content") or ""
+        try:
+            log.info("llm.debug.response", text=text, has_tool_call=bool(message.get("tool_calls")))
+        except Exception:
+            pass
         return LLMResponse(text=text, tool_call=_first_tool_call(message), raw=data)
 
     async def stream(

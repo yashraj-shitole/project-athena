@@ -50,6 +50,14 @@ CREATE TABLE IF NOT EXISTS documents (
     status        TEXT NOT NULL DEFAULT 'uploaded',
                   -- 'uploaded' | 'processing' | 'indexed' | 'failed'
     error_message TEXT,
+    -- Progress + post-completion metadata (FR-4 ingest status).
+    current_stage     TEXT,                -- 'extracting' | 'chunking' | 'embedding' | 'indexing' | 'completed' | 'failed'
+    stage_progress    JSONB NOT NULL DEFAULT '{}'::jsonb,  -- {stage: 0..100}
+    chunk_count       INT,
+    embedding_model   TEXT,
+    started_at        TIMESTAMPTZ,
+    processed_at      TIMESTAMPTZ,
+    processing_time_ms INT,
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
