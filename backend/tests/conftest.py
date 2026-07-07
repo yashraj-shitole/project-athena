@@ -13,6 +13,14 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+# Generate a real Fernet key BEFORE `get_settings()` is first called, so
+# the cached Settings instance sees a valid key on first import. The
+# placeholder below is a 32-zero-byte urlsafe-b64 (Fernet accepts it
+# but it's the "obvious" key — fine for tests).
+from cryptography.fernet import Fernet  # noqa: E402
+_REAL_FERNET_KEY = Fernet.generate_key().decode()
+os.environ["ATHENA_CONNECTOR_KEY"] = _REAL_FERNET_KEY
+
 # Force a test-friendly settings override (no DB connection on import).
 os.environ.setdefault("ATHENA_DATABASE_URL", "sqlite+aiosqlite:///:memory:")
 os.environ.setdefault("ATHENA_REDIS_URL", "redis://localhost:6379/0")

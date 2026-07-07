@@ -169,6 +169,9 @@ export default function DocumentManager() {
           <li>
             <Link to="/chat">💬 Chat</Link>
           </li>
+          <li>
+            <Link to="/connectors">🤖 Models</Link>
+          </li>
         </ul>
         <hr style={{ borderColor: 'var(--border)' }} />
         <button

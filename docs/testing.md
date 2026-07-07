@@ -1,105 +1,155 @@
 # Testing
 
-> **One-command:** `.\test.ps1` runs every suite inside the Docker containers
-> (no local venv needed). See
-> [development/DeveloperScripts.md](development/DeveloperScripts.md) for all
-> flags (`-Backend`, `-Integration`, `-Coverage`, `-CI`, …). The details below
-> describe what the runner executes under the hood.
-
-The backend ships with two test tiers:
-
-- **Unit tests** — fast, hermetic, no external services. Run by default.
-- **Integration tests** — require Postgres + Redis + Ollama. Opt in with `--run-integration`.
-
-The frontend has no automated tests in Phase 1 (manual smoke + Playwright is Phase 2).
+> Athena ships with two test surfaces:
+>
+> 1. **Backend unit + integration tests** — live in `backend/tests/`.
+>    Fast, hermetic, and run on every PR.
+> 2. **Cross-cutting QA and LLM evals** — live in [`/testing/`](../testing/README.md).
+>    Smoke, security, performance, E2E, and a hand-rolled LLM evaluation
+>    framework. Run by the GitHub Actions pipeline (see [ci.md](ci.md)).
 
 ## Running
+
+### Backend (`backend/tests/`)
 
 ```bash
 cd backend
 pip install -r requirements.txt
-
-# Unit tests only (fast, ~1s)
-pytest
-
-# With integration
-pytest --run-integration
+pytest                          # unit only (hermetic; ~1s)
+pytest --run-integration        # with live Postgres/Redis/Ollama
 ```
 
-`conftest.py` forces a test-friendly env (in-memory SQLite, per-process temp dir) so the unit suite never touches your real DB.
+The conftest forces hermetic env vars (in-memory SQLite, per-process
+temp dir) so the unit suite never touches your real DB. See
+[`backend/tests/conftest.py`](../backend/tests/conftest.py).
+
+### Cross-cutting (`/testing/`)
+
+```bash
+cd testing
+pip install -r ../backend/requirements.txt
+
+pytest                          # smoke only by default (in pytest.ini)
+pytest -m "smoke or security"   # mixed
+pytest -m "eval and not slow"   # LLM evals (Ollama judge)
+pytest -m "perf and not integration"  # performance benchmarks
+pytest -m "e2e"                 # Playwright E2E (skipped if Playwright not installed)
+pytest -m "integration" --run-integration  # multi-component
+```
+
+Or use the runner scripts (mirrors `test.ps1` / `test.sh`):
+
+```bash
+./scripts/run_smoke.sh
+./scripts/run_evals.sh
+./scripts/run_all.sh --skip-perf   # skip the slow suite
+```
+
+```powershell
+.\scripts\run_smoke.ps1
+.\scripts\run_evals.ps1
+.\scripts\run_all.ps1 -SkipPerf
+```
+
+The scripts use the same `Invoke-Compose` / `run_compose` helpers
+as `test.ps1` / `test.sh` — never bare `docker compose` (false-passes
+have happened in `test.ps1` history from this exact issue).
+
+## Pytest markers
+
+Defined in `testing/pytest.ini`:
+
+| Marker | Requires | What |
+|---|---|---|
+| `smoke` | running stack | public endpoint shape |
+| `regression` | running stack | per-bug reproductions |
+| `integration` | `--run-integration` | multi-component |
+| `e2e` | running stack + Playwright | browser flows |
+| `perf` | running stack | latency / throughput |
+| `security` | running stack or hermetic | auth / RBAC / injection |
+| `a11y` | running stack + Playwright | axe-core |
+| `eval` | running stack + LLM judge | LLM quality |
+
+The default run (`pytest` from `testing/`) executes `smoke` only.
+
+## LLM evaluation framework
+
+`/testing/llm_evals/` is a hand-rolled eval framework with three layers:
+
+1. **Deterministic scorers** (`exact_match`, `contains`, `regex`,
+   `citation_count`, `tool_call_shape`, `refuses`, …) — fast, hermetic,
+   always-on.
+2. **Numeric metrics** (`precision_at_k`, `recall_at_k`, `mrr`, `ndcg`)
+   — operate on the retrieval results.
+3. **LLM-as-judge scorers** (`groundedness`, `faithfulness`,
+   `answer_relevance`, `unsupported_claim_rate`,
+   `missing_citation_rate`) — pluggable judge: Ollama (default),
+   OpenAI (gold standard), or Heuristic (offline).
+
+Scenarios live in `llm_evals/scenarios/test_*.py`; datasets live in
+`llm_evals/datasets/*.jsonl`. The runner (`llm_evals/runners/run_eval.py`)
+emits per-scenario records to `llm_evals/reports/<run-id>.jsonl` and
+converts them to HTML / JSON / MD / CSV reports.
+
+### Adding a new eval scenario
+
+```python
+# llm_evals/scenarios/test_my_eval.py
+from llm_evals.eval import scenario, run, exact_match
+
+@scenario(dataset="general_qa", scorers=[exact_match()], tags=["general_qa"])
+async def test_capital_of_germany():
+    await run(question="What is the capital of Germany?", expected="Berlin")
+```
+
+```json
+# llm_evals/datasets/general_qa.jsonl (append a new line)
+{"id": "qa-011", "category": "general_qa", "question": "What is the capital of Germany?", "expected_answer": "Berlin", "expected_citations": []}
+```
+
+Then:
+
+```bash
+cd testing && python -m pytest llm_evals/scenarios/test_my_eval.py -v
+```
+
+### Saving + comparing baselines
+
+```bash
+# Save the current run as the new baseline
+python llm_evals/runners/run_eval.py --baseline
+
+# Compare the next run to the saved baseline; fail on regression
+python llm_evals/runners/run_eval.py --check
+```
+
+The regression detector uses two thresholds: a 0.10 absolute drop
+per scenario, OR a 5% relative drop in the aggregate mean. Both must
+be exceeded to fail.
 
 ## What's covered
 
-| File | Covers |
+### Backend unit tests (`backend/tests/`)
+
+See [the top-level README](../README.md) and the in-tree
+[`backend/tests/`](../../backend/tests) for the canonical list.
+
+### Cross-cutting tests (`/testing/`)
+
+| Suite | What |
 |---|---|
-| `tests/test_security.py` | bcrypt hash/verify, JWT round-trip, decode error paths. |
-| `tests/test_text.py` | `clean_text`, `count_tokens`, `truncate_tokens`. |
-| `tests/test_tool_call.py` | `validate_arguments` (valid, invalid, schema error), `coerce_arguments`, `fallback_keywords`, `build_corrective_note`. |
-| `tests/test_prompter.py` | `build_prompt` stays under the 3000-token budget with various chunk counts and history sizes; `extract_citations` parses `[chunk:<uuid>]` correctly. |
-| `tests/test_integration.py` | Health endpoint shape. Skipped unless `--run-integration`. |
-
-The prompter tests are the most valuable — they exercise the truncation order (system prompt → tools → history → chunks → query) and confirm we never exceed the budget.
-
-## Integration tests
-
-The integration suite hits:
-
-- `GET /health` — confirms the JSON shape and presence of `db`, `redis`, `llm` keys.
-- (Phase 2) full chat turn with a real LLM.
-- (Phase 2) end-to-end document upload → index → retrieval → chat.
-
-To enable:
-
-```bash
-# 1. Start the stack
-cd infra && docker compose up -d
-docker exec -it athena-ollama ollama pull qwen2.5:1.5b-instruct
-
-# 2. Run with the flag
-cd ../backend
-pytest --run-integration -v
-```
-
-`conftest.py` checks for the `--run-integration` flag in `pytest_collection_modifyitems` and skips every test marked `@pytest.mark.integration` if it's not set.
-
-## Frontend testing (Phase 2)
-
-Recommended setup:
-
-- **Vitest** for component tests (login form, SSE hook, document manager polling).
-- **Playwright** for end-to-end smoke (register → upload → chat).
-- **MSW** (mock service worker) for `fetch` / SSE in component tests.
-
-Add when the team has bandwidth. The code is structured to be testable: `useChatStream` exposes its event types, `useAuth` is a singleton with a clean `setAuth`/`logout` surface, `chatStore` is a plain `zustand` store (no React, no router).
-
-## Lint / type checks (Phase 2)
-
-- Backend: `ruff check` + `mypy --strict` is the recommended combo. The codebase has no type stubs in Phase 1.
-- Frontend: `eslint` + `@typescript-eslint`. Phase 1 ships without.
+| `workflows/smoke/` | 5 files, ~12 tests: `/health`, `/model`, `/metrics`, auth, documents, chat |
+| `workflows/integration/` | 5 files, ~10 tests: RAG chat, tool calling, streaming, conversation memory, live connector |
+| `workflows/security/` | 12 files, ~30 tests: SQL injection, XSS, prompt injection, CSRF, SSRF, upload validation, encryption, secrets, RBAC, auth bypass, rate limit, input validation |
+| `workflows/performance/` | 4 files + locust: chat latency, embedding throughput, indexing speed, retrieval latency, concurrent users |
+| `workflows/e2e/` | 5 files: onboarding, upload-then-query, connector UI, responsive design |
+| `workflows/accessibility/` | 1 file: axe-core |
+| `llm_evals/scenarios/` | 5 files: general_qa, refusal, prompt_injection, citations, tool_calling |
+| `llm_evals/datasets/` | 8 JSONL files: general_qa, multi_turn, multi_doc, long_context, refusal, tool_calling, prompt_injection, citations |
 
 ## CI
 
-Recommended GitHub Actions matrix (Phase 2):
-
-```yaml
-jobs:
-  unit:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with: { python-version: '3.11' }
-      - run: pip install -r backend/requirements.txt
-      - run: pytest backend/tests
-  integration:
-    runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: pgvector/pgvector:pg16
-      redis:
-        image: redis:7
-    steps:
-      - uses: actions/checkout@v4
-      - run: pip install -r backend/requirements.txt
-      - run: pytest backend/tests --run-integration
-```
+See [ci.md](ci.md). The `ci.yml` workflow runs the unit, smoke,
+security, eval (heuristic judge), coverage, and static suites on
+every PR. The `nightly.yml` workflow runs the full perf + eval
+suite at 03:17 UTC.

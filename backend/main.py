@@ -12,12 +12,13 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from app.api import auth, chat, documents, health, tools
+from app.api import auth, chat, connectors, documents, health, tools
 from app.core.cache import close as close_cache
 from app.core.config import get_settings
 from app.core.logging import configure_logging, get_logger
 from app.services.llm.ollama import close_ollama
 from app.services.orchestrator.llm_client import close_llm
+from app.services.providers.health import start_probe, stop_probe
 
 
 @asynccontextmanager
@@ -31,9 +32,15 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
         model=settings.ollama_model,
         budget=settings.token_budget,
     )
+    # Phase F: start the background health probe. The probe walks
+    # every enabled connector and pings the upstream; the loop is
+    # a single asyncio task (no apscheduler) that respects the
+    # configured interval.
+    await start_probe()
     try:
         yield
     finally:
+        await stop_probe()
         await close_cache()
         await close_ollama()
         await close_llm()
@@ -63,6 +70,7 @@ app.include_router(auth.router, prefix="/api")
 app.include_router(documents.router, prefix="/api")
 app.include_router(chat.router, prefix="/api")
 app.include_router(tools.router, prefix="/api")
+app.include_router(connectors.router)  # /api/connectors/*
 app.include_router(health.router)  # /health, /model (no /api prefix — matches nginx)
 
 

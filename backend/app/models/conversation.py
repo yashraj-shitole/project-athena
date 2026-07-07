@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Any, List
+from typing import Any, List, Optional
 
 from sqlalchemy import (
     BigInteger,
@@ -81,5 +81,13 @@ class Message(Base):
         ),
         nullable=False,
     )
+    # Which connector / model produced this message. NULL for messages
+    # produced before the EMC module shipped, or for messages that did
+    # not invoke a model (e.g. `user` messages — the user picker fills
+    # this in for the *assistant* reply on its own row).
+    connector_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), nullable=True
+    )
+    model: Mapped[Optional[str]] = mapped_column(String, nullable=True)
 
     conversation: Mapped["Conversation"] = relationship(back_populates="messages")

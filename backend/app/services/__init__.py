@@ -37,6 +37,11 @@ try:
 except ImportError:  # pragma: no cover
     orchestrator = None  # type: ignore[assignment]
 
+try:
+    from app.services import providers  # noqa: F401
+except ImportError:  # pragma: no cover
+    providers = None  # type: ignore[assignment]
+
 __all__ = [
     "embedding",
     "text",
@@ -45,4 +50,5 @@ __all__ = [
     "retrieval",
     "tools",
     "orchestrator",
+    "providers",
 ]

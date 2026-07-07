@@ -1,0 +1,50 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  release-eval:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: athena
+          POSTGRES_PASSWORD: athena
+          POSTGRES_DB: athena
+        ports: ["5432:5432"]
+      redis:
+        image: redis:7
+        ports: ["6379:6379"]
+      ollama:
+        image: ollama/ollama:latest
+        ports: ["11434:11434"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: pip install -r backend/requirements.txt
+      - name: Pull model
+        run: docker exec $HOSTNAME ollama pull qwen2.5:1.5b-instruct || true
+      - name: Start api
+        run: |
+          cd backend && uvicorn main:app --host 0.0.0.0 --port 8000 &
+          for i in 1 2 3 4 5; do
+            if curl -fsS http://localhost:8000/health; then break; fi
+            sleep 3
+          done
+      - name: Full eval suite + save baseline
+        env:
+          ATHENA_TEST_BASE_URL: http://localhost:8000
+        run: |
+          cd testing && python llm_evals/runners/run_eval.py --judge ollama --baseline
+      - name: Publish eval artifacts
+        run: |
+          python testing/ci/scripts/publish_artifacts.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-eval
+          path: testing/llm_evals/reports/

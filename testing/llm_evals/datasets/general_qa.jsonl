@@ -1,0 +1,10 @@
+{"id": "qa-001", "category": "general_qa", "question": "What is the capital of France?", "expected_answer": "Paris", "expected_citations": [], "retrieval_relevant_docs": []}
+{"id": "qa-002", "category": "general_qa", "question": "What is the capital of Japan?", "expected_answer": "Tokyo", "expected_citations": [], "retrieval_relevant_docs": []}
+{"id": "qa-003", "category": "general_qa", "question": "What is the boiling point of water at sea level in Celsius?", "expected_answer": "100", "expected_citations": []}
+{"id": "qa-004", "category": "general_qa", "question": "Who wrote 'Pride and Prejudice'?", "expected_answer": "Jane Austen", "expected_citations": []}
+{"id": "qa-005", "category": "general_qa", "question": "What is the largest planet in our solar system?", "expected_answer": "Jupiter", "expected_citations": []}
+{"id": "qa-006", "category": "general_qa", "question": "In what year did World War II end?", "expected_answer": "1945", "expected_citations": []}
+{"id": "qa-007", "category": "general_qa", "question": "What is the chemical symbol for gold?", "expected_answer": "Au", "expected_citations": []}
+{"id": "qa-008", "category": "general_qa", "question": "How many continents are there on Earth?", "expected_answer": "7", "expected_citations": []}
+{"id": "qa-009", "category": "general_qa", "question": "What is the speed of light in a vacuum, in m/s? (rounded to two significant figures)", "expected_answer": "300000000", "expected_citations": []}
+{"id": "qa-010", "category": "general_qa", "question": "What is the smallest country in the world by area?", "expected_answer": "Vatican", "expected_citations": []}

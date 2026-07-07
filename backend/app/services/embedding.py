@@ -4,32 +4,44 @@ The model is loaded once per process. Reused by:
 - ingestion: chunk embedding
 - retrieval: query embedding
 - keyword extraction: chunk embedding for cosine-based selection
+
+`SentenceTransformer` is imported lazily so test environments without
+torch (or even without sentence-transformers installed) can still
+import this module — `get_model()` is what actually needs the heavy
+imports, and only at first use.
 """
 from __future__ import annotations
 
 import asyncio
 import threading
 from functools import lru_cache
-from typing import Awaitable, Callable, List, Optional, Sequence
+from typing import TYPE_CHECKING, Awaitable, Callable, List, Optional, Sequence
 
 import numpy as np
-from sentence_transformers import SentenceTransformer
 
 from app.core.config import settings
 from app.core.logging import get_logger
 
+if TYPE_CHECKING:  # pragma: no cover
+    from sentence_transformers import SentenceTransformer
+
 log = get_logger(__name__)
 
 _lock = threading.Lock()
-_model: SentenceTransformer | None = None
+_model: "SentenceTransformer | None" = None
 
 
-def get_model() -> SentenceTransformer:
+def get_model() -> "SentenceTransformer":
     """Lazy, thread-safe model singleton."""
     global _model
     if _model is None:
         with _lock:
             if _model is None:
+                # Defer the heavy import to first use so test suites
+                # that never embed anything don't pay the cost (and
+                # don't crash on environments without torch).
+                from sentence_transformers import SentenceTransformer
+
                 log.info(
                     "embedding.model.load",
                     model=settings.EMBED_MODEL_NAME,

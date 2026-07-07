@@ -1,0 +1,23 @@
+{
+  "provider": "custom",
+  "name": "Custom REST",
+  "default_base_url": "https://api.example.com/v1",
+  "auth_type": "bearer",
+  "default_model": "my-model",
+  "models": ["my-model"],
+  "settings": {
+    "request_template": {
+      "model": "{{model}}",
+      "messages": "{{messages}}"
+    },
+    "response_paths": {
+      "text": "output.text",
+      "tool_call": "output.tool_call"
+    }
+  },
+  "capabilities": {
+    "chat": true,
+    "stream": false,
+    "tools": true
+  }
+}

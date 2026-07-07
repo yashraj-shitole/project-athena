@@ -1,0 +1,16 @@
+{
+  "provider": "gemini",
+  "name": "Google Gemini",
+  "default_base_url": "https://generativelanguage.googleapis.com",
+  "auth_type": "header",
+  "auth_header_name": "x-goog-api-key",
+  "default_model": "gemini-1.5-pro",
+  "models": ["gemini-1.5-pro", "gemini-1.5-flash"],
+  "capabilities": {
+    "chat": true,
+    "stream": true,
+    "tools": true,
+    "vision": true,
+    "embeddings": false
+  }
+}

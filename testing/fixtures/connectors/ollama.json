@@ -1,0 +1,14 @@
+{
+  "provider": "ollama",
+  "name": "Ollama (self-hosted)",
+  "default_base_url": "http://localhost:11434",
+  "auth_type": "none",
+  "default_model": "qwen2.5:1.5b-instruct",
+  "models": ["qwen2.5:1.5b-instruct", "qwen2.5:7b-instruct", "llama3.1:8b"],
+  "capabilities": {
+    "chat": true,
+    "stream": true,
+    "tools": true,
+    "embeddings": true
+  }
+}

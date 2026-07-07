@@ -65,11 +65,100 @@ Auth is via `Authorization: Bearer <access_token>` header. The token is a JWT si
 {
   "message": "string",
   "conversation_id": "uuid | null",
-  "tool_subset": ["search_documents"] | null
+  "tool_subset": ["search_documents"] | null,
+  "connector_id": "uuid | null",
+  "model": "string | null"
 }
 ```
 
+`connector_id` and `model` are forwarded to `ModelRouter.resolve()`. When both are `null`, the request falls back to the user's default connector, then the system default, then the built-in Ollama. See [connectors.md](connectors.md) for the full story.
+
+The assistant `Message` carries the same fields on the way back (`connector_id`, `model`) so the chat UI can show which model answered.
+
 `ChatResponse`:
+```json
+{
+  "conversation_id": "uuid",
+  "message": {
+    "id": "uuid",
+    "seq": 12,
+    "role": "assistant",
+    "content": "...",
+    "citations": [ { "chunk_id": "uuid", "document_name": "...", "page_number": 3, "snippet": "..." } ],
+    "used_tools": [ { "name": "search_documents", "status": "ok" } ],
+    "connector_id": "uuid | null",
+    "model": "gpt-4o-mini | null",
+    "created_at": "..."
+  }
+}
+```
+
+## Connectors (External Model Connectors)
+
+> See [connectors.md](connectors.md) for the architecture, data model, and provider-adapter contract. This section is the REST reference.
+
+| Method | Path                                          | Auth        | Purpose                                      |
+|--------|-----------------------------------------------|-------------|----------------------------------------------|
+| `GET`    | `/api/connectors`                           | user        | list own + admin-shared                      |
+| `POST`   | `/api/connectors`                           | user        | create (with plaintext `api_key`)            |
+| `GET`    | `/api/connectors/{id}`                      | owner/admin | fetch one (public schema, no secret)         |
+| `PATCH`  | `/api/connectors/{id}`                      | owner/admin | update; `api_key=""` = no change             |
+| `DELETE` | `/api/connectors/{id}`                      | owner/admin | soft delete                                  |
+| `POST`   | `/api/connectors/{id}/clone`                | user        | duplicate (omits secret)                     |
+| `POST`   | `/api/connectors/{id}/set-default`          | user        | set as user default                          |
+| `POST`   | `/api/connectors/test`                      | user        | probe a payload WITHOUT saving               |
+| `GET`    | `/api/connectors/{id}/health`               | user        | last health snapshot                         |
+| `GET`    | `/api/connectors/{id}/models`               | user        | cached discovered models                     |
+| `POST`   | `/api/connectors/{id}/refresh-models`       | user        | re-probe provider                            |
+| `GET`    | `/api/connectors/{id}/usage?days=7`         | owner/admin | daily aggregates                             |
+| `GET`    | `/api/connectors/{id}/audit`                | owner/admin | paginated audit log                          |
+| `GET`    | `/api/connectors/templates`                 | user        | canned `provider` + `default_base_url`       |
+| `GET`    | `/api/connectors/registry`                  | user        | flat list of `(provider, class)`             |
+
+`ModelConnectorCreate`:
+```json
+{
+  "name": "My OpenAI account",
+  "provider": "openai_compat",
+  "base_url": "https://api.openai.com/v1",
+  "auth_type": "bearer",
+  "auth_header_name": null,
+  "organization_id": null,
+  "project_id": null,
+  "api_version": null,
+  "custom_headers": {},
+  "default_model": "gpt-4o-mini",
+  "models": ["gpt-4o-mini", "gpt-4o"],
+  "capabilities": { "chat": true, "stream": true, "tools": true },
+  "settings": { "timeout_s": 30, "temperature": 0.7 },
+  "is_enabled": true,
+  "is_admin": false,
+  "is_favorite": false,
+  "group_name": null,
+  "tags": [],
+  "api_key": "sk-..."
+}
+```
+
+`ModelConnectorPublic` is the read shape and **never** carries `api_key` or `api_key_enc`. The encrypted column is decrypted only at adapter-construction time, on a single in-process hop, and the plaintext is dropped when the request finishes.
+
+`HealthReport` (from `/test` and `/{id}/health`):
+```json
+{
+  "ok": true,
+  "latency_ms": 142,
+  "status": "online",
+  "capabilities": { "chat": true, "stream": true, "tools": true },
+  "models": null,
+  "error": null,
+  "category": "ok",
+  "status_code": 200
+}
+```
+
+The `category` field is one of the stable `CAT_*` constants (`ok`, `auth_failed`, `rate_limited`, `not_found`, `timeout`, `network`, `bad_request`, `server_error`, `invalid_response`, `unsupported`, `unknown`).
+
+## Tools (FR-27, FR-28, FR-29, FR-30)
 ```json
 {
   "conversation_id": "uuid",
@@ -131,6 +220,19 @@ Auth is via `Authorization: Bearer <access_token>` header. The token is a JWT si
     "redis": { "ok": true, "ms": 1 },
     "llm":   { "ok": true, "ms": 14, "model": "qwen2.5:1.5b-instruct" }
   }
+}
+```
+
+`/model` shape — if a user-default connector is registered, the response surfaces it instead of the env-var Ollama defaults:
+```json
+{
+  "model": "gpt-4o-mini",
+  "provider": "openai_compat",
+  "base_url": "https://api.openai.com/v1",
+  "context_budget": 3000,
+  "embedding_model": "sentence-transformers/all-MiniLM-L6-v2",
+  "embedding_dim": 384,
+  "connector_id": "uuid"
 }
 ```
 

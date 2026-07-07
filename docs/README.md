@@ -47,7 +47,10 @@ Phase 1 MVP — functional. All FR-01…39 functional requirements are implement
 | Understand the SSE streaming wire format | [architecture/streaming.md](architecture/streaming.md) |
 | Understand the token budget enforcement | [architecture/token-budget.md](architecture/token-budget.md) |
 | Configure env vars / deployment | [configuration.md](configuration.md) |
+| Register external AI providers (OpenAI, Anthropic, etc.) | [connectors.md](connectors.md) |
 | Run tests | [testing.md](testing.md) |
+| Run the cross-cutting QA / LLM eval framework | [`/testing/README.md`](../testing/README.md) |
+| CI pipeline reference | [ci.md](ci.md) |
 | Develop / extend the frontend | [frontend.md](frontend.md) |
 | Migrate to Phase 2 | [phase-2.md](phase-2.md) |
 | Review a specific bug class | [debugging.md](debugging.md) |

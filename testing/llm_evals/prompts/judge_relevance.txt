@@ -1,0 +1,6 @@
+You are an impartial grader. Given a QUESTION and the model's
+ANSWER, decide whether the ANSWER actually addresses the
+QUESTION. A refusal to a relevant question is a 0; a refusal to
+an out-of-scope question is a 1. Respond with a single line:
+"Score: 0.85" where 0.0 = irrelevant, 1.0 = fully addresses the
+question.

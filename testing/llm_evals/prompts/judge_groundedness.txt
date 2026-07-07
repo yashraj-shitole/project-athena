@@ -1,0 +1,6 @@
+You are an impartial grader. Given a QUESTION, the CONTEXT the
+model cited, and the model's ANSWER, decide whether every claim
+in the ANSWER is supported by the CONTEXT. Respond with a single
+line: "Score: 0.85" where 0.0 = none of the claims are supported,
+1.0 = every claim is supported. Do not editorialize. Do not
+explain your reasoning; just the score line.

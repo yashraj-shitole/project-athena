@@ -31,6 +31,11 @@ class MessagePublic(ORMModelBase):
     citations: List[Citation] = Field(default_factory=list)
     used_tools: List[dict[str, Any]] = Field(default_factory=list)
     created_at: datetime
+    # EMC: which connector + model produced this message. NULL for
+    # messages from before the EMC module shipped, or for `user` /
+    # `system` messages that did not invoke a model.
+    connector_id: uuid.UUID | None = None
+    model: str | None = None
 
 
 class ChatRequest(ORMModelBase):
@@ -41,6 +46,13 @@ class ChatRequest(ORMModelBase):
     # FR-30: explicitly request a tool subset; empty = orchestrator selects.
     tool_subset: List[str] | None = None
     stream: bool = False
+    # EMC: pin this turn to a specific connector / model. When both
+    # are None the router falls through to the user default, then
+    # the system default, then the built-in Ollama — preserving
+    # Phase 1 behaviour. `model` is ignored if `connector_id` is
+    # None (we'd be talking to a different connector anyway).
+    connector_id: uuid.UUID | None = None
+    model: str | None = None
 
 
 class ChatResponse(ORMModelBase):

@@ -1,0 +1,22 @@
+{
+  "provider": "anthropic",
+  "name": "Anthropic",
+  "default_base_url": "https://api.anthropic.com",
+  "auth_type": "header",
+  "auth_header_name": "x-api-key",
+  "default_model": "claude-3-5-sonnet-20241022",
+  "models": [
+    "claude-3-5-sonnet-20241022",
+    "claude-3-5-haiku-20241022",
+    "claude-3-opus-20240229"
+  ],
+  "capabilities": {
+    "chat": true,
+    "stream": true,
+    "tools": true,
+    "vision": true,
+    "embeddings": false,
+    "json_mode": false,
+    "structured": false
+  }
+}

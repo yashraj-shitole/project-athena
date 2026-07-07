@@ -81,6 +81,11 @@ export function useChatStream() {
           conversation_id: opts.conversationId || null,
           tool_subset: opts.toolSubset || null,
           stream: true,
+          // Phase D: forward the model-picker selection. The backend's
+          // ModelRouter resolves `(connectorId, model)`; null/null
+          // means "use the built-in Ollama fallback" (Phase 1 behavior).
+          connector_id: opts.connectorId || null,
+          model: opts.model || null,
         },
         { signal: ac.signal },
       );

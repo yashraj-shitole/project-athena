@@ -4,18 +4,27 @@ Public entry points:
   - run_turn():  non-streaming structured response (ChatResponse)
   - stream_turn(): yields SSE bytes (RUN_STARTED → text deltas → tool
                   lifecycle → RUN_FINISHED / RUN_ERROR)
+
+EMC integration: both entry points accept `connector_id` and `model`
+kwargs. When set, the LLMClient routes the call to the named external
+connector; when None, the router falls through to user default → system
+default → built-in Ollama (preserving Phase 1 behaviour). The resolved
+`(connector_id, model)` is persisted on the assistant Message and a
+`connector_usage` row is written per turn.
 """
 from __future__ import annotations
 
+import time
 import uuid
-from typing import Any, AsyncIterator, List
+from decimal import Decimal
+from typing import Any, AsyncIterator, List, Optional
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logging import get_logger
 from app.models.conversation import Conversation, Message
 from app.services.llm import streamer as sse
-from app.services.orchestrator.llm_client import LLMClient, get_llm
+from app.services.orchestrator.llm_client import LLMClient
 from app.services.orchestrator.prompter import (
     SYSTEM_PROMPT,
     build_prompt,
@@ -27,10 +36,49 @@ from app.services.orchestrator.tool_call import (
     fallback_keywords,
     validate_arguments,
 )
+from app.services.providers.usage import (
+    STATUS_AUTH_FAILED,
+    STATUS_ERROR,
+    STATUS_OK,
+    STATUS_STREAM_INTERRUPTED,
+    STATUS_TIMEOUT,
+    record as record_usage,
+)
+from app.services.providers import base as pal
 from app.services.retrieval import search as retrieval_search
 from app.tools import registry as tool_registry
 
 log = get_logger(__name__)
+
+# Single router instance per process. Adapters it constructs are
+# cached, so the second turn with the same connector reuses the
+# existing httpx pool rather than allocating fresh sockets.
+_router = None  # type: ignore[var-annotated]
+
+
+def _get_router():
+    global _router
+    if _router is None:
+        from app.services.providers.router import ModelRouter
+
+        _router = ModelRouter()
+    return _router
+
+
+def _make_llm(
+    session: AsyncSession,
+    *,
+    user_id: uuid.UUID,
+    connector_id: Optional[uuid.UUID],
+    model: Optional[str],
+) -> LLMClient:
+    return LLMClient(
+        session,
+        user_id=user_id,
+        connector_id=connector_id,
+        model=model,
+        router=_get_router(),
+    )
 
 
 # ---------------------------------------------------------------------
@@ -98,6 +146,8 @@ def _persist_message(
     content: str,
     citations: list | None = None,
     used_tools: list | None = None,
+    connector_id: uuid.UUID | None = None,
+    model: str | None = None,
 ) -> Message:
     msg = Message(
         user_id=user_id,
@@ -106,9 +156,51 @@ def _persist_message(
         content=content,
         citations=citations or [],
         used_tools=used_tools or [],
+        # Persist the connector + model that produced the message.
+        # NULL for `user` messages and for messages that did not
+        # invoke a model (e.g. pre-EMC history rows).
+        connector_id=connector_id,
+        model=model,
     )
     session.add(msg)
     return msg
+
+
+def _record_usage_row(
+    session: AsyncSession,
+    *,
+    llm: LLMClient,
+    user_id: uuid.UUID,
+    status: str = STATUS_OK,
+    error_class: Optional[str] = None,
+) -> None:
+    """Append one `connector_usage` row for this turn.
+
+    Skipped when the turn went to the built-in Ollama fallback
+    (`resolved_connector_id is None`): the row is meant to track
+    user-attributed external-connector traffic. Falling back is
+    the absence of an EMC choice, not a separate connector.
+    """
+    if llm.resolved_connector_id is None:
+        return
+    try:
+        record_usage(
+            session,
+            connector_id=llm.resolved_connector_id,
+            user_id=user_id,
+            model=llm.resolved_model or "",
+            prompt_tokens=int((llm.last_usage or {}).get("prompt_tokens") or 0),
+            completion_tokens=int((llm.last_usage or {}).get("completion_tokens") or 0),
+            latency_ms=int(llm.last_latency_ms or 0),
+            status=status,
+            error_class=error_class,
+            cost_estimate=Decimal("0"),
+        )
+    except Exception as exc:  # noqa: BLE001
+        # A usage-row failure must not fail the chat turn. Log and
+        # move on; the dashboard's aggregates will be slightly
+        # under-counted for this turn, which is acceptable.
+        log.warning("agent.usage_record_failed", error=str(exc))
 
 
 # ---------------------------------------------------------------------
@@ -185,6 +277,8 @@ async def run_turn(
     message: str,
     conversation_id: uuid.UUID | None = None,
     tool_subset: list[str] | None = None,
+    connector_id: uuid.UUID | None = None,
+    model: str | None = None,
 ) -> dict[str, Any]:
     """Run a single chat turn end-to-end (no streaming)."""
     conv = await _ensure_conversation(
@@ -224,9 +318,56 @@ async def run_turn(
         tools=tool_schemas,
     )
 
-    # 5. LLM first pass
-    llm = get_llm()
-    resp = await llm.complete(messages=built.messages, tools=built.tools)
+    # 5. LLM first pass. One LLMClient instance per turn so we
+    # share the resolved connector + accumulated usage across
+    # the (possibly multi-pass) agent loop.
+    llm = _make_llm(
+        session,
+        user_id=user_id,
+        connector_id=connector_id,
+        model=model,
+    )
+    error_class: Optional[str] = None
+    turn_status: str = STATUS_OK
+    try:
+        resp = await llm.complete(messages=built.messages, tools=built.tools)
+    except pal.ProviderError as exc:
+        # Persist a clear assistant error message so the user sees
+        # what happened, write a usage row, and return.
+        error_class = exc.category
+        turn_status = _status_from_error_class(exc.category)
+        assistant = _persist_message(
+            session,
+            user_id=user_id,
+            conversation_id=conv.id,
+            role="assistant",
+            content=f"[llm error: {exc}]",
+            connector_id=llm.resolved_connector_id,
+            model=llm.resolved_model or None,
+        )
+        _record_usage_row(
+            session,
+            llm=llm,
+            user_id=user_id,
+            status=turn_status,
+            error_class=error_class,
+        )
+        await session.commit()
+        await session.refresh(assistant)
+        return {
+            "conversation_id": str(conv.id),
+            "message": {
+                "id": str(assistant.id),
+                "seq": assistant.seq,
+                "role": "assistant",
+                "content": assistant.content,
+                "citations": [],
+                "used_tools": [],
+                "created_at": assistant.created_at,
+                "connector_id": str(assistant.connector_id) if assistant.connector_id else None,
+                "model": assistant.model,
+            },
+        }
 
     used_tools_log: list[dict] = []
     final_chunks = list(initial_chunks)
@@ -353,7 +494,14 @@ async def run_turn(
         content=resp.text or "",
         citations=citations,
         used_tools=used_tools_log,
+        connector_id=llm.resolved_connector_id,
+        model=llm.resolved_model or None,
     )
+    # 8. One usage row per turn. `llm.last_usage` was filled by
+    # `complete()`; for turns that re-ask after a tool result, the
+    # final `complete()` call wins (which is what the dashboard
+    # wants — total tokens / latency for the user-visible turn).
+    _record_usage_row(session, llm=llm, user_id=user_id)
     await session.commit()
     await session.refresh(assistant)
     await session.refresh(conv)
@@ -368,6 +516,8 @@ async def run_turn(
             "citations": citations,
             "used_tools": used_tools_log,
             "created_at": assistant.created_at,
+            "connector_id": str(assistant.connector_id) if assistant.connector_id else None,
+            "model": assistant.model,
         },
     }
 
@@ -382,9 +532,20 @@ async def stream_turn(
     message: str,
     conversation_id: uuid.UUID | None = None,
     tool_subset: list[str] | None = None,
+    connector_id: uuid.UUID | None = None,
+    model: str | None = None,
 ) -> AsyncIterator[bytes]:
     """Yield SSE bytes for one turn. Ends with RUN_FINISHED or RUN_ERROR."""
     run_id = uuid.uuid4()
+    llm = _make_llm(
+        session,
+        user_id=user_id,
+        connector_id=connector_id,
+        model=model,
+    )
+    error_class: Optional[str] = None
+    turn_status: str = STATUS_OK
+    interrupted = False
     try:
         conv = await _ensure_conversation(
             session, user_id, conversation_id, title_seed=message
@@ -418,12 +579,16 @@ async def stream_turn(
             tools=tool_schemas,
         )
 
-        llm = get_llm()
-
         # First pass: prefer non-streaming so we can detect a tool call
         # cheaply (streaming + tool calls requires incremental JSON parse,
         # which is overkill for Phase 1).
-        first = await llm.complete(messages=built.messages, tools=built.tools)
+        try:
+            first = await llm.complete(messages=built.messages, tools=built.tools)
+        except pal.ProviderError as exc:
+            error_class = exc.category
+            turn_status = _status_from_error_class(exc.category)
+            yield sse.run_error(run_id, error=str(exc))
+            return
 
         used_tools_log: list[dict] = []
         final_chunks = list(initial_chunks)
@@ -470,6 +635,14 @@ async def stream_turn(
                     if delta:
                         chunks_seen.append(delta)
                         yield sse.text_message_content(msg_id, delta)
+                    if ev.get("error"):
+                        # ProviderError-class failure surfaced during
+                        # the stream. Note it for the usage row but
+                        # keep what we already emitted (the user
+                        # sees a partial answer + the SSE RUN_ERROR
+                        # event the adapter / agent emits).
+                        error_class = error_class or "stream_interrupted"
+                        interrupted = True
                 text_to_stream = "".join(chunks_seen)
                 streamed_content = True
             else:
@@ -501,6 +674,20 @@ async def stream_turn(
             content=text_to_stream,
             citations=citations,
             used_tools=used_tools_log,
+            connector_id=llm.resolved_connector_id,
+            model=llm.resolved_model or None,
+        )
+        # If any streamed chunk carried `error`, mark the turn as
+        # stream-interrupted for the usage dashboard. (Successful
+        # turns keep the default STATUS_OK.)
+        if interrupted:
+            turn_status = STATUS_STREAM_INTERRUPTED
+        _record_usage_row(
+            session,
+            llm=llm,
+            user_id=user_id,
+            status=turn_status,
+            error_class=error_class,
         )
         await session.commit()
         await session.refresh(assistant)
@@ -510,6 +697,25 @@ async def stream_turn(
         log.error("agent.stream.error", error=str(exc))
         try:
             await session.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+        # The unhandled-exception path. We still want a usage row so
+        # the dashboard reflects the failure category; if the LLM
+        # never resolved we have no connector_id to attribute to, so
+        # `record_usage_row` is a no-op.
+        if not error_class:
+            error_class = "unknown"
+        if turn_status == STATUS_OK:
+            turn_status = STATUS_ERROR
+        try:
+            _record_usage_row(
+                session,
+                llm=llm,
+                user_id=user_id,
+                status=turn_status,
+                error_class=error_class,
+            )
+            await session.commit()
         except Exception:  # noqa: BLE001
             pass
         yield sse.run_error(run_id, error=str(exc))
@@ -549,6 +755,27 @@ def json_dumps(obj: Any) -> str:
     import json
 
     return json.dumps(obj, default=str)
+
+
+# Map PAL error category → usage `status` value. The taxonomy is
+# stable; the dashboard's filter dropdown is keyed on these strings.
+_PROVIDER_CATEGORY_TO_USAGE_STATUS = {
+    "ok": STATUS_OK,
+    "auth_failed": STATUS_AUTH_FAILED,
+    "rate_limited": "rate_limited",
+    "timeout": STATUS_TIMEOUT,
+    "network": STATUS_ERROR,
+    "server_error": STATUS_ERROR,
+    "bad_request": STATUS_ERROR,
+    "not_found": STATUS_ERROR,
+    "invalid_response": STATUS_ERROR,
+    "unsupported": STATUS_ERROR,
+    "unknown": STATUS_ERROR,
+}
+
+
+def _status_from_error_class(category: str) -> str:
+    return _PROVIDER_CATEGORY_TO_USAGE_STATUS.get(category, STATUS_ERROR)
 
 
 __all__ = ["run_turn", "stream_turn"]

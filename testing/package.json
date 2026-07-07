@@ -1,0 +1,22 @@
+{
+  "name": "athena-testing",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Cross-cutting QA and LLM eval layer for Project Athena.",
+  "scripts": {
+    "smoke": "bash scripts/run_smoke.sh",
+    "evals": "bash scripts/run_evals.sh",
+    "security": "bash scripts/run_security.sh",
+    "perf": "bash scripts/run_perf.sh",
+    "all": "bash scripts/run_all.sh",
+    "test:js": "vitest run"
+  },
+  "devDependencies": {
+    "vitest": "^2.0.0",
+    "@testing-library/react": "^16.0.0",
+    "@testing-library/jest-dom": "^6.5.0",
+    "@playwright/test": "^1.48.0",
+    "axe-core": "^4.10.0",
+    "jsdom": "^25.0.0"
+  }
+}

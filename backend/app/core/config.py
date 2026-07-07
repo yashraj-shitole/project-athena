@@ -94,6 +94,22 @@ class Settings(BaseSettings):
     # ---- CORS ----
     cors_origins: List[str] = Field(default_factory=lambda: ["http://localhost:5173"])
 
+    # ---- External Model Connectors ----
+    # Fernet key (urlsafe-base64 32-byte) used to encrypt connector API
+    # keys at rest. If empty in non-dev environments the app refuses to
+    # boot — the dev fallback derives a key from `jwt_secret` via HKDF
+    # so a fresh checkout works without manual setup.
+    connector_key: str = ""
+    # Background health probe cadence. 0 disables the loop.
+    connector_health_interval_s: float = 60.0
+    # After this many consecutive failures a connector is auto-disabled
+    # (circuit breaker). Set to 0 to disable auto-disable.
+    connector_health_failure_threshold: int = 3
+    # Soft cap on the number of API calls in a single health probe
+    # cycle. Keeps the loop from saturating the event loop on a large
+    # user base.
+    connector_health_max_per_cycle: int = 20
+
     @field_validator("storage_dir", mode="before")
     @classmethod
     def _ensure_path(cls, v):
@@ -106,6 +122,9 @@ class Settings(BaseSettings):
           `environment != "dev"`.
         - `cors_origins` must not be the localhost dev default when
           `environment == "prod"`.
+        - `connector_key` must be set in non-dev environments
+          (encrypting API keys with a JWT-derived key ties their
+          lifetime to JWT rotation — surprising in production).
         """
         if self.environment.lower() not in {"dev", "development", "test", "local"}:
             if self.jwt_secret in _KNOWN_INSECURE_SECRETS:
@@ -118,6 +137,16 @@ class Settings(BaseSettings):
                 raise RuntimeError(
                     "ATHENA_CORS_ORIGINS still contains a localhost origin in "
                     "prod. Set explicit production origins."
+                )
+        if self.environment.lower() not in {"dev", "development", "test", "local"}:
+            if not self.connector_key:
+                raise RuntimeError(
+                    "ATHENA_CONNECTOR_KEY is not set. The app refuses to "
+                    "encrypt External Model Connector API keys with a key "
+                    "derived from ATHENA_JWT_SECRET outside dev. Generate "
+                    "one with `python -c \"from cryptography.fernet import "
+                    "Fernet; print(Fernet.generate_key().decode())\"` and "
+                    "set it in the environment."
                 )
 
     def ensure_dirs(self) -> None:

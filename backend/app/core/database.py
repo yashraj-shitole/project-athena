@@ -36,12 +36,15 @@ class Base(DeclarativeBase):
 
 _settings = get_settings()
 
-engine = create_async_engine(
-    _settings.database_url,
-    echo=_settings.db_echo,
-    pool_size=_settings.db_pool_size,
-    pool_pre_ping=True,
-)
+# SQLite (used by the unit-test suite via `aiosqlite:///:memory:`) does
+# not accept `pool_size` or `pool_pre_ping` — StaticPool is the only
+# supported pool there. We branch on the URL scheme so production
+# Postgres keeps the connection pool it expects.
+_engine_kwargs: dict = {"echo": _settings.db_echo, "pool_pre_ping": True}
+if not _settings.database_url.startswith("sqlite"):
+    _engine_kwargs["pool_size"] = _settings.db_pool_size
+
+engine = create_async_engine(_settings.database_url, **_engine_kwargs)
 
 SessionLocal = async_sessionmaker(
     bind=engine,

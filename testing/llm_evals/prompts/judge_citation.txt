@@ -1,0 +1,5 @@
+You are an impartial grader. Given the model's ANSWER and the
+context it had available, return the fraction of factual claims
+in the ANSWER that LACK a [chunk:<uuid>] inline reference. Respond
+with: "Score: 0.20" where 0.0 = every claim is cited, 1.0 =
+nothing is cited.

@@ -1,0 +1,82 @@
+name: nightly
+
+on:
+  schedule:
+    - cron: "17 3 * * *"  # 03:17 UTC daily
+  workflow_dispatch:        # allow manual trigger
+
+jobs:
+  perf:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: athena
+          POSTGRES_PASSWORD: athena
+          POSTGRES_DB: athena
+        ports: ["5432:5432"]
+      redis:
+        image: redis:7
+        ports: ["6379:6379"]
+      ollama:
+        image: ollama/ollama:latest
+        ports: ["11434:11434"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: pip install -r backend/requirements.txt
+      - name: Pull model
+        run: docker exec $HOSTNAME ollama pull qwen2.5:1.5b-instruct || true
+      - name: Start api
+        run: |
+          cd backend && uvicorn main:app --host 0.0.0.0 --port 8000 &
+          for i in 1 2 3 4 5 6 7 8 9 10; do
+            if curl -fsS http://localhost:8000/health; then break; fi
+            sleep 3
+          done
+      - name: Performance benchmarks
+        run: |
+          cd testing && python -m pytest workflows/performance -ra --tb=short \
+            --chat-latency-budget=10 --embedding-budget=10 --indexing-budget=60
+      - name: Locust load test
+        run: |
+          pip install locust
+          cd testing && locust -f workflows/performance/locustfile.py \
+            --host=http://localhost:8000 --headless -u 50 -r 10 -t 120s \
+            --csv=../reports/locust
+      - name: Upload perf artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-perf
+          path: testing/reports/
+
+  eval-gold:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    if: ${{ vars.OPENAI_API_KEY != '' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: pip install -r backend/requirements.txt
+      - name: Start api
+        run: |
+          cd backend && uvicorn main:app --host 0.0.0.0 --port 8000 &
+          for i in 1 2 3 4 5; do
+            if curl -fsS http://localhost:8000/health; then break; fi
+            sleep 3
+          done
+      - name: Run gold-standard eval
+        env:
+          OPENAI_API_KEY: ${{ vars.OPENAI_API_KEY }}
+          ATHENA_TEST_BASE_URL: http://localhost:8000
+        run: |
+          cd testing && python llm_evals/runners/run_eval.py --judge openai --check
+      - name: Upload eval reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-eval
+          path: testing/llm_evals/reports/

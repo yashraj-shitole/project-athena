@@ -95,6 +95,8 @@ async def get_conversation(
             citations=m.citations or [],
             used_tools=m.used_tools or [],
             created_at=m.created_at,
+            connector_id=m.connector_id,
+            model=m.model,
         )
         for m in (conv.messages or [])
     ]
@@ -136,6 +138,8 @@ async def chat(req: ChatRequest, user_id: CurrentUserId, session: DbSession) -> 
         message=req.message,
         conversation_id=req.conversation_id,
         tool_subset=req.tool_subset,
+        connector_id=req.connector_id,
+        model=req.model,
     )
     return ChatResponse(
         conversation_id=out["conversation_id"],
@@ -158,6 +162,8 @@ async def chat_stream(
             message=req.message,
             conversation_id=req.conversation_id,
             tool_subset=req.tool_subset,
+            connector_id=req.connector_id,
+            model=req.model,
         ):
             yield chunk
 

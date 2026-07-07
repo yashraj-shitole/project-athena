@@ -50,3 +50,14 @@ logs/
 # ---------- OS ----------
 Thumbs.db
 .DS_Store
+
+# ---------- /testing/ runtime artifacts ----------
+testing/reports/
+testing/coverage/
+testing/.pytest_cache/
+testing/llm_evals/reports/
+testing/llm_evals/metrics/
+testing/node_modules/
+testing/playwright-report/
+testing/test-results/
+testing/.last-suite.json

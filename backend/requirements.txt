@@ -15,6 +15,7 @@ email-validator==2.2.0
 
 # --- Database (async) ---
 sqlalchemy[asyncio]==2.0.35
+greenlet>=3.0.3            # required by SQLAlchemy's async engine (greenlet_spawn)
 asyncpg==0.29.0
 psycopg2-binary==2.9.9         # sync driver for one-off migrations/tools
 pgvector==0.3.6                # pgvector SQLAlchemy type (vector(N))
@@ -23,6 +24,9 @@ alembic==1.13.3                # optional; schema is also installable via init.s
 # --- Auth ---
 PyJWT==2.9.0
 bcrypt==4.2.0
+
+# --- External Model Connectors (encrypted credential storage) ---
+cryptography==43.0.1
 
 # --- Tool validation ---
 jsonschema==4.23.0
@@ -56,5 +60,6 @@ structlog==24.4.0              # structured logging
 # --- Test ---
 pytest==8.3.3
 pytest-asyncio==0.24.0
+respx==0.21.1            # httpx mocking for provider-adapter tests
 httpx==0.27.2
 aiosqlite==0.20.0           # in-memory DB for hermetic unit tests

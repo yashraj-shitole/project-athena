@@ -1,0 +1,15 @@
+{
+  "provider": "azure_openai",
+  "name": "Azure OpenAI",
+  "default_base_url": "https://YOUR-RESOURCE.openai.azure.com",
+  "auth_type": "header",
+  "auth_header_name": "api-key",
+  "api_version": "2024-02-01",
+  "default_model": "gpt-4o",
+  "models": ["gpt-4o", "gpt-35-turbo"],
+  "capabilities": {
+    "chat": true,
+    "stream": true,
+    "tools": true
+  }
+}

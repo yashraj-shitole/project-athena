@@ -60,6 +60,13 @@ project-athena/
 │   ├── docker-compose.yml   postgres, redis, ollama, api
 │   ├── init.sql             DB schema with RLS + pgvector + tsvector
 │   └── nginx.conf           reverse proxy
+├── testing/                 Cross-cutting QA + LLM eval framework
+│   ├── workflows/           smoke / integration / regression / e2e / perf / security / a11y
+│   ├── llm_evals/           Hand-rolled eval framework (deterministic + LLM-as-judge)
+│   ├── fixtures/            Sample documents + connector configs
+│   ├── mocks/               httpx MockTransport handlers + stub LLM/ProviderAdapter
+│   ├── scripts/             run_smoke / run_evals / run_perf / run_security / run_all (.ps1 + .sh)
+│   └── ci/                  GitHub Actions workflows
 └── docs/                    design and reference docs
 ```
 

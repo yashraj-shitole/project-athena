@@ -3,6 +3,8 @@ import { Link, useNavigate, useParams } from 'react-router-dom';
 import { useAuth } from '../hooks/useAuth.js';
 import { useChatStream } from '../hooks/useChatStream.js';
 import { useChatStore } from '../store/chatStore.js';
+import useConnectorsStore from '../store/connectorsStore.js';
+import ModelPicker from '../components/ModelPicker.jsx';
 
 /**
  * A stable, locally-unique temporary id generator. We avoid `Date.now()`
@@ -49,6 +51,12 @@ export default function ChatInterface() {
   useEffect(() => {
     cancelRef.current = streamCancel;
   }, [streamCancel]);
+
+  // Phase D: the chat UI reads from the connectors store to know
+  // which `(connectorId, model)` to send in the chat request body.
+  // The store is also persisted (activeModel is in localStorage) so
+  // the picker's choice survives a page reload.
+  const { activeModel } = useConnectorsStore();
 
   const [input, setInput] = useState('');
   const composerRef = useRef(null);
@@ -129,7 +137,11 @@ export default function ChatInterface() {
 
     let sentOk = true;
     try {
-      await stream.send(text, { conversationId: convId });
+      await stream.send(text, {
+        conversationId: convId,
+        connectorId: activeModel?.connectorId || null,
+        model: activeModel?.model || null,
+      });
     } catch (e) {
       sentOk = false;
     } finally {
@@ -228,6 +240,7 @@ export default function ChatInterface() {
         <hr style={{ borderColor: 'var(--border)' }} />
         <ul style={{ listStyle: 'none', padding: 0 }}>
           <li><Link to="/">📄 Documents</Link></li>
+          <li><Link to="/connectors">🤖 Models</Link></li>
         </ul>
         <hr style={{ borderColor: 'var(--border)' }} />
         <button
@@ -243,6 +256,7 @@ export default function ChatInterface() {
       <main className="main">
         <header className="topbar">
           <h2 style={{ margin: 0 }}>Chat</h2>
+          <ModelPicker />
         </header>
         <div className="chat">
           <div className="messages">

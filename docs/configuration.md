@@ -55,6 +55,11 @@ A `.env` file at the backend root is also picked up.
 | **Cache namespaces** |||
 | `ATHENA_CACHE_PREFIX_RETRIEVAL` | `"search"` | |
 | `ATHENA_CACHE_PREFIX_TOOL_DEF` | `"tools"` | |
+| **External Model Connectors** |||
+| `ATHENA_CONNECTOR_KEY` | (none) | Fernet key for API-key encryption. **Required in prod**; the dev fallback is HKDF-derived from `ATHENA_JWT_SECRET` and emits a structlog warning on every decrypt. |
+| `ATHENA_CONNECTOR_HEALTH_INTERVAL_S` | `60` | Health-probe tick interval. |
+| `ATHENA_CONNECTOR_HEALTH_FAILURE_THRESHOLD` | `3` | Consecutive failures before auto-disable. |
+| `ATHENA_CONNECTOR_HEALTH_MAX_PER_CYCLE` | `50` | Max rows probed per cycle. |
 
 ## UPPER_CASE aliases
 
@@ -71,6 +76,7 @@ curl http://localhost:8000/model
 ## Production checklist
 
 - [ ] Set `ATHENA_JWT_SECRET` to a long random string (`openssl rand -hex 32`).
+- [ ] Set `ATHENA_CONNECTOR_KEY` to a Fernet key (`python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`). Required for at-rest encryption of connector API keys.
 - [ ] Set `ATHENA_ENVIRONMENT=prod` (controls log verbosity in some paths).
 - [ ] Restrict `ATHENA_CORS_ORIGINS` to the actual frontend domain.
 - [ ] Set `ATHENA_UPLOAD_MAX_BYTES` appropriate to the available storage.

@@ -1,6 +1,7 @@
 import React from 'react';
 import { Navigate, Route, Routes, useLocation } from 'react-router-dom';
 import ChatInterface from './pages/ChatInterface.jsx';
+import Connectors from './pages/Connectors.jsx';
 import DocumentDetail from './pages/DocumentDetail.jsx';
 import DocumentManager from './pages/DocumentManager.jsx';
 import Login from './pages/Login.jsx';
@@ -78,6 +79,14 @@ function App() {
         element={
           <Protected>
             <DocumentDetail />
+          </Protected>
+        }
+      />
+      <Route
+        path="/connectors"
+        element={
+          <Protected>
+            <Connectors />
           </Protected>
         }
       />
