@@ -71,6 +71,172 @@ def _build_options() -> dict[str, Any]:
     }
 
 
+# ---------------------------------------------------------------------
+# M-31 — PII redaction in debug logs.
+#
+# The prompt and response can contain anything a user pastes in:
+# email addresses, API keys, phone numbers, names, the contents of
+# an uploaded document. Logging the raw `messages` and `text` is a
+# data-handling hazard; logs are far harder to redact after the
+# fact than they are to keep clean in the first place.
+#
+# The fingerprint below lets an operator verify the conversation is
+# being sent as expected (correct count, correct total size, correct
+# role distribution) without ever persisting the contents. If a
+# dispute ever needs the actual content, the audit log in
+# `audit.record` keeps the conversation id, the connector id, and
+# the model — the orchestrator's caller (the user) is the source of
+# truth for the text.
+# ---------------------------------------------------------------------
+_PII_REDACTED = "[redacted]"
+
+
+def _fingerprint_role(role: Any) -> str:
+    """Normalize a message role to one of {system, user, assistant, tool, other}."""
+    if not isinstance(role, str):
+        return "other"
+    r = role.lower()
+    if r in ("system", "user", "assistant", "tool"):
+        return r
+    return "other"
+
+
+def _fingerprint_text(text: Any) -> tuple[int, int]:
+    """Return (char_count, content_hash_prefix) for a single content fragment.
+
+    Hashes are not stored — only the first 8 hex chars of a SHA-256
+    digest, which is enough to tell *this run* apart from *another
+    run with the same shape* without leaking the content itself.
+    The fingerprint's job is to be "good enough for an operator to
+    tell the conversation changed", not to be cryptographically
+    meaningful.
+    """
+    import hashlib
+
+    if not isinstance(text, str):
+        return 0, ""
+    s = text
+    if not s:
+        return 0, ""
+    digest = hashlib.sha256(s.encode("utf-8", errors="replace")).hexdigest()
+    return len(s), digest[:8]
+
+
+def _fingerprint_content(content: Any) -> dict[str, Any]:
+    """Fingerprint a single message's ``content`` field.
+
+    The content can be a string, a list of content-part dicts
+    (the OpenAI multimodal shape), or None. Each text part is
+    length- and hash-fingerprinted; image / file parts are counted
+    but their payload is not inspected.
+    """
+    if content is None:
+        return {"parts": 0, "chars": 0, "hash": ""}
+    if isinstance(content, str):
+        chars, h = _fingerprint_text(content)
+        return {"parts": 1, "chars": chars, "hash": h}
+    if isinstance(content, list):
+        total_chars = 0
+        first_hash = ""
+        text_parts = 0
+        nontext_parts = 0
+        for part in content:
+            if isinstance(part, dict):
+                ptype = part.get("type")
+                if ptype in ("text", None):
+                    text_parts += 1
+                    chars, h = _fingerprint_text(part.get("text", ""))
+                    total_chars += chars
+                    if not first_hash and h:
+                        first_hash = h
+                else:
+                    # image / file / audio — count it but don't peek
+                    nontext_parts += 1
+        return {
+            "parts": len(content),
+            "text_parts": text_parts,
+            "nontext_parts": nontext_parts,
+            "chars": total_chars,
+            "hash": first_hash,
+        }
+    # Unknown shape — return the size of the repr but not the content
+    return {"parts": 1, "chars": len(repr(content)), "hash": ""}
+
+
+def _fingerprint_messages(messages: list[Any]) -> dict[str, Any]:
+    """Return a structural fingerprint of a prompt's message list.
+
+    Output shape::
+
+        {
+            "count": <int>,                # number of messages
+            "total_chars": <int>,          # sum of text lengths
+            "roles": {"system": <n>, "user": <n>, ...},
+            "has_tools": <bool>,           # any tool/function message?
+            "first_user_chars": <int>,     # size of the first user msg
+        }
+
+    The actual content of any message is never included.
+    """
+    if not isinstance(messages, list):
+        return {
+            "count": 0,
+            "total_chars": 0,
+            "roles": {},
+            "has_tools": False,
+            "first_user_chars": 0,
+        }
+    roles: dict[str, int] = {}
+    total = 0
+    first_user = 0
+    has_tool = False
+    for m in messages:
+        if not isinstance(m, dict):
+            roles["other"] = roles.get("other", 0) + 1
+            continue
+        role = _fingerprint_role(m.get("role"))
+        roles[role] = roles.get(role, 0) + 1
+        if role == "tool":
+            has_tool = True
+        fp = _fingerprint_content(m.get("content"))
+        total += fp["chars"]
+        if role == "user" and first_user == 0 and fp["chars"]:
+            first_user = fp["chars"]
+    return {
+        "count": len(messages),
+        "total_chars": total,
+        "roles": roles,
+        "has_tools": has_tool,
+        "first_user_chars": first_user,
+    }
+
+
+def _fingerprint_response(pal_resp: Any, model: str = "") -> dict[str, Any]:
+    """Return a structural fingerprint of an LLMResponse.
+
+    Captures the *shape* of the response (length, presence of a
+    tool call, model, usage) without ever persisting the actual
+    text the model produced.
+
+    The ``model`` argument is the orchestrator's resolved model
+    name, since the PAL's ``LLMResponse`` does not carry a model
+    field — the orchestrator tracks the model separately.
+    """
+    text = getattr(pal_resp, "text", "") or ""
+    if not isinstance(text, str):
+        text = ""
+    tool_call = getattr(pal_resp, "tool_call", None)
+    usage = getattr(pal_resp, "usage", None) or {}
+    resp_model = getattr(pal_resp, "model", None) or model or ""
+    return {
+        "chars": len(text),
+        "has_tool_call": tool_call is not None,
+        "tool_name": (tool_call or {}).get("name", "") if isinstance(tool_call, dict) else "",
+        "model": resp_model if isinstance(resp_model, str) else "",
+        "usage": {k: v for k, v in usage.items() if isinstance(v, (int, float))} if isinstance(usage, dict) else {},
+    }
+
+
 class LLMResponse:
     """Normalized LLM response (text + optional single tool call).
 
@@ -202,7 +368,13 @@ class LLMClient:
         model = self._request_model or self._model
 
         try:
-            log.info("llm.debug.prompt", messages=messages, tools=bool(tools))
+            # M-31 — never log the raw prompt. A user message may
+            # contain email addresses, names, API keys, or other
+            # PII. Log the structural fingerprint (count, total
+            # chars, role distribution) so an operator can verify
+            # the conversation is being sent as expected, without
+            # persisting the contents.
+            log.info("llm.debug.prompt", **_fingerprint_messages(messages))
         except Exception:
             pass
 
@@ -221,10 +393,13 @@ class LLMClient:
         self.last_usage = pal_resp.usage or {}
 
         try:
+            # M-31 — same redaction on the response side. The
+            # assistant message may also echo PII (a user asking
+            # "what's my email" and the model repeating it back,
+            # for example).
             log.info(
                 "llm.debug.response",
-                text=pal_resp.text,
-                has_tool_call=bool(pal_resp.tool_call),
+                **_fingerprint_response(pal_resp, model=self._model),
             )
         except Exception:
             pass
@@ -260,6 +435,15 @@ class LLMClient:
         t0 = time.perf_counter()
 
         try:
+            # M-31 — fingerprint the prompt on the streaming path
+            # too. The streaming route does not have a single
+            # response object at this point, so we log the prompt
+            # shape and skip the response fingerprint.
+            log.info("llm.debug.prompt", **_fingerprint_messages(messages))
+        except Exception:
+            pass
+
+        try:
             async for ev in adapter.stream(
                 pal.ChatRequest(
                     messages=messages,
@@ -281,7 +465,15 @@ class LLMClient:
             self.last_provider = adapter.name
 
 
-__all__ = ["LLMClient", "LLMResponse", "_first_tool_call", "get_llm", "close_llm"]
+__all__ = [
+    "LLMClient",
+    "LLMResponse",
+    "_first_tool_call",
+    "_fingerprint_messages",
+    "_fingerprint_response",
+    "get_llm",
+    "close_llm",
+]
 
 
 # ---------------------------------------------------------------------

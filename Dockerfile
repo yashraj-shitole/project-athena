@@ -93,6 +93,14 @@ WORKDIR /app/backend
 
 EXPOSE 8000
 
+# M-25 — declare USER last so the `athena` user owns the runtime
+# context. The entrypoint script re-execs to `athena` via gosu
+# after fixing storage ownership, but declaring USER here gives
+# the image a sane default if a caller overrides the entrypoint
+# (e.g. ``docker run --entrypoint /bin/sh``). The image now has
+# *no* code path that runs uvicorn as root.
+USER athena
+
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
     CMD curl -fsS http://localhost:8000/health || exit 1
 

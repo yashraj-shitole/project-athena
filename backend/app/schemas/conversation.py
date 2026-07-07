@@ -7,11 +7,11 @@ from typing import Any, List
 
 from pydantic import Field
 
-from app.schemas.base import ORMModelBase
+from app.schemas.base import ORMModelBase, RequestBase
 from app.schemas.chunk import Citation
 
 
-class ConversationCreate(ORMModelBase):
+class ConversationCreate(RequestBase):
     title: str | None = None
 
 
@@ -38,7 +38,7 @@ class MessagePublic(ORMModelBase):
     model: str | None = None
 
 
-class ChatRequest(ORMModelBase):
+class ChatRequest(RequestBase):
     """Non-streaming or initiator for a streaming chat turn."""
 
     conversation_id: uuid.UUID | None = None

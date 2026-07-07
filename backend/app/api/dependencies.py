@@ -11,7 +11,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import get_settings
 from app.core.database import get_db
 from app.core.deps import get_current_user_id
-from app.core.database import reset_rls_user, set_rls_user
+from app.core.database import (
+    reset_rls_admin,
+    reset_rls_user,
+    set_rls_admin,
+    set_rls_user,
+)
 from app.models.user import User
 
 # Re-export the standard aliases
@@ -63,6 +68,11 @@ async def get_user_db(
     the next request that reuses it.
     """
     await set_rls_user(session, user_id)
+    # The caller is, by definition, not an admin. Set the admin
+    # GUC to FALSE so the database-level ``athena_is_admin()``
+    # predicate (see init.sql) cannot be tricked by a leftover
+    # TRUE from a previous request on the same pooled connection.
+    await set_rls_admin(session, is_admin=False)
     try:
         yield session
     finally:
@@ -71,9 +81,39 @@ async def get_user_db(
         except Exception:  # noqa: BLE001
             pass
         await reset_rls_user(session)
+        await reset_rls_admin(session)
+
+
+async def get_admin_db(
+    admin: AdminUser,
+    session: Annotated[AsyncSession, Depends(get_db)],
+) -> AsyncIterator[AsyncSession]:
+    """DB session with both RLS GUCs set: ``user_id`` and ``is_admin``.
+
+    H-2 — the database-level ``athena_is_admin()`` predicate reads
+    ``app.is_admin``. This dependency is the *only* session-yielding
+    dependency that sets it to TRUE; the ``require_admin`` dep
+    guards the route, and we set the GUC after that check passes.
+
+    Like :func:`get_user_db`, both GUCs are reset in ``finally``
+    so the next request on the pooled connection cannot inherit
+    the admin bit.
+    """
+    await set_rls_user(session, admin.id)
+    await set_rls_admin(session, is_admin=True)
+    try:
+        yield session
+    finally:
+        try:
+            await session.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+        await reset_rls_admin(session)
+        await reset_rls_user(session)
 
 
 DbSession = Annotated[AsyncSession, Depends(get_user_db)]
+AdminDbSession = Annotated[AsyncSession, Depends(get_admin_db)]
 
 
 async def get_current_user(

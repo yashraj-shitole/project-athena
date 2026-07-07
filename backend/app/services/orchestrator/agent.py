@@ -112,6 +112,69 @@ async def _ensure_conversation(
     return conv
 
 
+# ---------------------------------------------------------------------
+# H-13 — Per-message and per-history caps.
+#
+# The Phase-1 Ollama model is qwen2.5:1.5b-instruct with a 32K-token
+# context. A single user message of 8000 chars (the schema cap on
+# ``ChatRequest.message``) is ~2000 tokens; multiplied by 16 history
+# messages that's 32K tokens just for the messages, with no room for
+# the system prompt, tool defs, retrieved chunks, or the answer.
+# The prompter would then aggressively truncate and the LLM would
+# either lose critical context or fail outright.
+#
+# These helpers cap each individual message at 4000 chars and the
+# history list at 8 messages, leaving the prompter's budget logic to
+# handle the per-token fine-tuning. The persisted message is
+# unchanged; the truncation happens at the agent boundary so the
+# audit log still records what the user actually sent.
+# ---------------------------------------------------------------------
+_MAX_USER_MESSAGE_CHARS = 4000
+_MAX_HISTORY_MESSAGES = 8
+_MAX_HISTORY_MESSAGE_CHARS = 2000
+
+
+def _cap_message(message: str) -> tuple[str, bool]:
+    """Truncate the user message to a hard character cap.
+
+    Returns ``(capped_message, was_truncated)`` so the caller can
+    log the truncation event. We do NOT raise — a too-long message
+    is a soft failure that the LLM can still partially answer;
+    refusing the request would be a denial-of-service vector.
+    """
+    if not message:
+        return message, False
+    if len(message) <= _MAX_USER_MESSAGE_CHARS:
+        return message, False
+    log = get_logger(__name__)
+    log.warning(
+        "agent.message_capped",
+        original_chars=len(message),
+        cap=_MAX_USER_MESSAGE_CHARS,
+    )
+    return message[:_MAX_USER_MESSAGE_CHARS], True
+
+
+def _cap_history(history: list[dict]) -> list[dict]:
+    """Bound the history list (count + per-message length).
+
+    The list is already loaded with limit=16; we tighten it to
+    ``_MAX_HISTORY_MESSAGES`` here, keeping the most-recent ones.
+    Each remaining message is truncated to
+    ``_MAX_HISTORY_MESSAGE_CHARS`` so a single 8000-char message
+    from the past cannot blow the budget.
+    """
+    if len(history) > _MAX_HISTORY_MESSAGES:
+        history = history[-_MAX_HISTORY_MESSAGES:]
+    out: list[dict] = []
+    for m in history:
+        content = m.get("content", "") or ""
+        if len(content) > _MAX_HISTORY_MESSAGE_CHARS:
+            content = content[:_MAX_HISTORY_MESSAGE_CHARS]
+        out.append({**m, "content": content})
+    return out
+
+
 async def _load_history(
     session: AsyncSession,
     user_id: uuid.UUID,
@@ -239,30 +302,18 @@ async def _execute_tool_call(
         # report the error.
         return {"error": err or "invalid_args"}, "error", None
 
-    # Built-in tools need the session + user_id injected automatically.
-    if tool_row.handler_type == "internal":
-        impl: str = (tool_row.handler_cfg or {}).get("impl", "")
-        if impl.endswith("search_documents:run"):
-            # Inject the user_id and session so the LLM schema stays clean.
-            merged = dict(args or {})
-            # Force-overwrite (NOT setdefault): the LLM/tool caller must
-            # never be able to select a different tenant's user_id — that
-            # would re-bind the RLS GUC and leak another user's chunks.
-            if merged.get("user_id") not in (None, str(user_id)):
-                return (
-                    {"error": "user_id may not be supplied in arguments"},
-                    "error",
-                    None,
-                )
-            merged["user_id"] = str(user_id)
-            merged["session"] = session
-            tool, result, status, _latency = await tool_registry.execute(
-                session, tool_name=tool_name, arguments=merged
-            )
-            return result, status, {"tool_id": str(tool.id)} if tool else None
-
+    # C-1 (Critical) — the registry owns the privilege invariant.
+    # The previous code had a special-case that only fired for
+    # ``search_documents:run``; the new design (``registry.execute``)
+    # handles the per-impl kwarg allowlist, the ``user_id`` /
+    # ``session`` injection, and the rejection of caller-supplied
+    # privilege-bearing kwargs in a single place. The orchestrator
+    # just threads the authenticated user through.
     tool, result, status, _latency = await tool_registry.execute(
-        session, tool_name=tool_name, arguments=args or {}
+        session,
+        tool_name=tool_name,
+        arguments=args or {},
+        user_id=user_id,
     )
     return result, status, {"tool_id": str(tool.id)} if tool else None
 
@@ -280,11 +331,23 @@ async def run_turn(
     connector_id: uuid.UUID | None = None,
     model: str | None = None,
 ) -> dict[str, Any]:
-    """Run a single chat turn end-to-end (no streaming)."""
+    """Run a single chat turn end-to-end (no streaming).
+
+    H-13 — pre-filter the user message and history length. The
+    schema cap on ``ChatRequest.message`` is 8000 chars; for the
+    Phase-1 Ollama model (qwen2.5:1.5b, 32K context) that's still
+    too much when combined with 16 history messages. We cap the
+    per-message content and the history list here so a malicious
+    caller cannot exhaust the LLM's context window with a single
+    turn (which would force a slow, expensive inference, or
+    fail with a context-length error and an opaque 500).
+    """
+    message, history_overflow = _cap_message(message)
     conv = await _ensure_conversation(
         session, user_id, conversation_id, title_seed=message
     )
     history = await _load_history(session, user_id, conv.id)
+    history = _cap_history(history)
 
     # 1. Persist user message
     _persist_message(
@@ -547,10 +610,14 @@ async def stream_turn(
     turn_status: str = STATUS_OK
     interrupted = False
     try:
+        # H-13 — see run_turn. The streaming path applies the same
+        # caps so a streaming caller cannot bypass them.
+        message, history_overflow = _cap_message(message)
         conv = await _ensure_conversation(
             session, user_id, conversation_id, title_seed=message
         )
         history = await _load_history(session, user_id, conv.id)
+        history = _cap_history(history)
 
         _persist_message(
             session,

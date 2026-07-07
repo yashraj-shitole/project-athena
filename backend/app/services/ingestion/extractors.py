@@ -7,11 +7,25 @@ either a plain string (prose) or a list of (sheet, rows) tuples
 Resource caps (`MAX_PAGES`, `MAX_ROWS`, `MAX_CHARS`) bound extraction
 so a single pathological file (huge PDF, million-row sheet) cannot
 monopolize memory/CPU or produce an unbounded number of chunks.
+
+Security note (C-3)
+------------------
+
+Every text result passes through :func:`sanitize_for_context` before
+it is returned. This removes the prompt-injection fence delimiters
+the orchestrator uses (``<<<CONTEXT_START>>>`` /
+``<<<CONTEXT_END>>>``) and a small list of well-known injection
+phrases ("ignore previous instructions", "system:", etc.). The
+sanitizer is **defense in depth** — the orchestrator already tells
+the LLM to treat retrieved chunks as untrusted — but a malicious
+document that uses the same fence delimiters could otherwise
+trivially escape the untrusted zone.
 """
 from __future__ import annotations
 
 import csv
 import io
+import re
 from pathlib import Path
 from typing import List, Tuple
 
@@ -25,6 +39,87 @@ MAX_PAGES = 500
 MAX_ROWS = 50_000
 MAX_CHARS = 2_000_000  # ~ a few hundred pages of text; chunker will split it
 MAX_HTML_CHARS = 2_000_000
+
+
+# --- Prompt-injection sanitization (C-3) ---------------------------------
+
+# Fence delimiters the orchestrator uses to wrap untrusted retrieved
+# context. A document that contains the closing delimiter can break
+# out of the untrusted zone in the assembled prompt. Strip both.
+_FENCE_RE = re.compile(r"<<<\s*/?\s*CONTEXT_(?:START|END)\s*>>>", re.IGNORECASE)
+
+# Lines that look like a chat role prefix — a classic injection
+# technique ("system: do the following ..."). Match the line *start*
+# only so a normal "System: foo" reference inside prose survives.
+_ROLE_PREFIX_RE = re.compile(
+    r"(?im)^\s*(system|assistant|user|tool|function)\s*:\s*"
+)
+
+# A small list of well-known "jailbreak" prefix phrases. We are
+# intentionally conservative: matching the literal phrase catches
+# the lazy variants without false-positiving on legitimate prose.
+# Long-tail variants ("disregard the prior context", "forget your
+# instructions") are caught by the LLM-judge that scores the
+# retrieval set; the regex here is a cheap first pass.
+_INJECTION_PHRASES = (
+    "ignore previous instructions",
+    "ignore the above",
+    "ignore all previous",
+    "ignore your instructions",
+    "disregard previous instructions",
+    "disregard your instructions",
+    "forget your instructions",
+    "forget everything above",
+    "you are now",
+    "new instructions:",
+    "system prompt:",
+)
+_INJECTION_RE = re.compile(
+    "|".join(re.escape(p) for p in _INJECTION_PHRASES),
+    re.IGNORECASE,
+)
+
+
+def sanitize_for_context(text: str) -> str:
+    """Strip prompt-injection patterns from extracted text.
+
+    C-3 — every extractor funnels its output through here before
+    returning. The function is **idempotent** (running it twice
+    yields the same result) and **lossy on purpose** — a sentence
+    that reads "ignore previous instructions" is more dangerous to
+    keep than useful to read.
+
+    What it strips:
+
+    1. The orchestrator's own fence delimiters
+       (``<<<CONTEXT_START>>>`` / ``<<<CONTEXT_END>>>``), so a
+       malicious document cannot break out of the untrusted zone.
+    2. Lines that look like a chat role prefix
+       (``system:`` / ``assistant:`` / ``user:`` / ``tool:`` /
+       ``function:``) at the start of a line. A normal mid-sentence
+       "the user said" reference is preserved.
+    3. A short list of well-known injection phrases (case-insensitive,
+       anywhere in the text). The phrase is replaced with a
+       neutral token ``[REDACTED-INJECTION]`` so the chunk length
+       and embedding position stay stable.
+
+    What it does **not** do:
+
+    * It does not try to detect every variant of every jailbreak
+      prompt — that is the LLM-judge's job downstream. The goal
+      here is to remove the cheap, structural attacks.
+    * It does not HTML-escape the text. The output is still plain
+      prose; React renders it as text, not HTML.
+    """
+    if not text:
+        return text
+    # 1. Fence delimiters
+    text = _FENCE_RE.sub("", text)
+    # 2. Role-prefix lines
+    text = _ROLE_PREFIX_RE.sub("", text)
+    # 3. Known injection phrases
+    text = _INJECTION_RE.sub("[REDACTED-INJECTION]", text)
+    return text
 
 
 class ExtractionResult:
@@ -194,7 +289,15 @@ _EXTRACTORS = {
 
 
 def extract(path: Path) -> ExtractionResult:
-    """Dispatch to the correct extractor based on file extension."""
+    """Dispatch to the correct extractor based on file extension.
+
+    C-3 — every result passes through :func:`sanitize_for_context`
+    on the way out. The sanitization is applied to ``text`` (prose
+    extractors) **and** to every cell of every table row in
+    ``tables`` (tabular extractors). A cell value that contains
+    the orchestrator's fence delimiters is scrubbed before it
+    reaches the chunker; the LLM never sees the raw text.
+    """
     ext = path.suffix.lower().lstrip(".")
     if ext not in settings.ALLOWED_UPLOAD_EXTS:
         raise ValueError(f"Unsupported file type: .{ext}")
@@ -203,6 +306,21 @@ def extract(path: Path) -> ExtractionResult:
         raise ValueError(f"No extractor registered for .{ext}")
     log.info("extract.start", path=str(path), ext=ext)
     result = fn(path)
+    # C-3: sanitize the prose path. This is the common case for
+    # PDF/DOCX/TXT/HTML; tabular extractors sanitize per-cell below.
+    if result.text:
+        result.text = sanitize_for_context(result.text)
+    # C-3: sanitize every cell in the tabular path. We mutate
+    # the row in place; the chunker reads from the same objects.
+    if result.tables:
+        sanitized_tables: list[Tuple[str, List[List[str]]]] = []
+        for sheet_name, rows in result.tables:
+            sanitized_rows = [
+                [sanitize_for_context(str(cell)) for cell in row]
+                for row in rows
+            ]
+            sanitized_tables.append((sheet_name, sanitized_rows))
+        result.tables = sanitized_tables
     log.info(
         "extract.done",
         path=str(path),

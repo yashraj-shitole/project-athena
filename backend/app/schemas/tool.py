@@ -7,7 +7,7 @@ from typing import Any
 
 from pydantic import Field
 
-from app.schemas.base import ORMModelBase
+from app.schemas.base import ORMModelBase, RequestBase
 
 
 class ToolPublic(ORMModelBase):
@@ -22,7 +22,7 @@ class ToolPublic(ORMModelBase):
     updated_at: datetime
 
 
-class ToolUpsert(ORMModelBase):
+class ToolUpsert(RequestBase):
     name: str
     description: str
     parameters: dict[str, Any] = Field(default_factory=dict)

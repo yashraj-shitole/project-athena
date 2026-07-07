@@ -26,11 +26,25 @@ from typing import Any, List, Optional
 from pydantic import Field, field_validator
 
 from app.models.connector import AUTH_TYPES, PROVIDERS
-from app.schemas.base import ORMModelBase
+from app.schemas.base import ORMModelBase, RequestBase
 
 
-class ModelConnectorCreate(ORMModelBase):
-    """Request body for `POST /api/connectors`."""
+class ModelConnectorCreate(RequestBase):
+    """Request body for `POST /api/connectors`.
+
+    Security notes
+    --------------
+
+    * ``is_admin=True`` is **always** accepted by the schema — the
+      route layer is the only place that knows whether the caller
+      is an admin. We don't push that policy into the schema because
+      the schema is shared with the test-suite (which exercises the
+      admin path explicitly). See ``app/api/connectors.py::create_connector``
+      for the privilege check.
+    * ``extra="forbid"`` is inherited from :class:`RequestBase` — a
+      payload containing a field this schema does not declare (e.g.
+      ``user_id``) is rejected with a 422 before reaching the route.
+    """
 
     name: str = Field(min_length=1, max_length=120)
     provider: str
@@ -91,13 +105,28 @@ class ModelConnectorCreate(ORMModelBase):
         return v
 
 
-class ModelConnectorUpdate(ORMModelBase):
+class ModelConnectorUpdate(RequestBase):
     """Request body for `PATCH /api/connectors/{id}`.
 
     Every field is optional. To rotate an API key, pass a non-empty
     `api_key`. To keep the existing key, omit the field or pass an
     empty string. There is no way to *clear* a key via this shape
     (a user with a key can rotate, but never accidentally wipe).
+
+    Security notes
+    --------------
+
+    * ``is_admin`` is **deliberately absent** from this schema. The
+      only way to make a connector admin-shared is via the create
+      path, and only when the caller is in the admin allowlist.
+      PATCHing an existing connector to flip ``is_admin`` would
+      otherwise be a one-request privilege escalation — the
+      ``connectors_iso`` RLS policy is ``user_id = me OR is_admin``,
+      so flipping the flag promotes the row into the global
+      visibility set. The fix is to remove the lever from the
+      schema (this file) **and** the PATCH mass-assignment loop
+      (``app/api/connectors.py::update_connector``).
+    * ``extra="forbid"`` is inherited from :class:`RequestBase`.
     """
 
     name: Optional[str] = Field(default=None, min_length=1, max_length=120)
@@ -115,7 +144,8 @@ class ModelConnectorUpdate(ORMModelBase):
     settings: Optional[dict[str, Any]] = None
     is_enabled: Optional[bool] = None
     is_default: Optional[bool] = None
-    is_admin: Optional[bool] = None
+    # ``is_admin`` removed: see class docstring. Promotion to
+    # admin-shared is create-only and admin-gated.
     group_name: Optional[str] = Field(default=None, max_length=120)
     tags: Optional[List[str]] = None
     is_favorite: Optional[bool] = None
@@ -210,8 +240,13 @@ class HealthCheckResult(ORMModelBase):
     status_code: Optional[int] = None
 
 
-class TestRequest(ORMModelBase):
-    """Test a connector without saving it (POST /api/connectors/test)."""
+class TestRequest(RequestBase):
+    """Test a connector without saving it (POST /api/connectors/test).
+
+    ``extra="forbid"`` is inherited from :class:`RequestBase` so a
+    payload smuggling ``is_admin`` (or any other field the server
+    does not declare) is rejected before the route runs.
+    """
 
     name: Optional[str] = "preview"
     provider: str

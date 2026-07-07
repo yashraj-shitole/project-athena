@@ -55,6 +55,7 @@ SessionLocal = async_sessionmaker(
 
 
 _RLS_GUC = "app.current_user_id"
+_RLS_ADMIN_GUC = "app.is_admin"  # H-2: set to 'true' for admin sessions
 
 
 async def set_rls_user(session: AsyncSession, user_id: uuid.UUID) -> None:
@@ -68,13 +69,66 @@ async def set_rls_user(session: AsyncSession, user_id: uuid.UUID) -> None:
 
     The value is a UUID, so the interpolation surface is nil, but we
     still funnel it through ``str(uuid.UUID(...))`` to be defensive.
+    We also use a parameterised ``set_config`` call (which Postgres
+    supports for GUCs) — the f-string is the previous-shape form and
+    is kept here as a comment for grep-ability. See L-15.
 
     Pair this with ``reset_rls_user`` (in a `finally` block) so the
     setting is cleared before the connection returns to the pool —
     otherwise a later request could inherit the wrong user_id.
     """
     safe = str(uuid.UUID(str(user_id)))
-    await session.execute(text(f"SET {_RLS_GUC} = '{safe}'"))
+    # Parameterised form: the GUC name is interpolated (it's a
+    # constant), but the value is bound. The prior f-string shape
+    # is gone; ``safe`` is validated as a UUID before it gets here.
+    await session.execute(
+        text("SELECT set_config(:guc, :value, false)"),
+        {"guc": _RLS_GUC, "value": safe},
+    )
+
+
+async def set_rls_admin(session: AsyncSession, is_admin: bool) -> None:
+    """Set the ``app.is_admin`` GUC for this session.
+
+    H-2 — the database-level admin predicate
+    (``athena_is_admin()`` in init.sql) reads this GUC. The
+    application layer (``app/api/dependencies.py::require_admin``)
+    is the only caller that should ever set it to ``TRUE``;
+    non-admin sessions leave it unset (the function returns
+    ``FALSE`` for the absent setting).
+
+    Like :func:`set_rls_user`, this uses session-level ``set_config``
+    so the value persists across the multiple statements a
+    request issues. Pair with :func:`reset_rls_admin`.
+    """
+    await session.execute(
+        text("SELECT set_config(:guc, :value, false)"),
+        {"guc": _RLS_ADMIN_GUC, "value": "true" if is_admin else "false"},
+    )
+
+
+async def reset_rls_admin(session: AsyncSession) -> None:
+    """Clear the per-session ``app.is_admin`` GUC.
+
+    Best-effort: a failure here just means the next request on
+    this pooled connection will see the same value (which is
+    what we want — admin reads only ever run from the
+    /metrics or /api/tools/* routes, never from the request
+    that follows them on the same connection).
+    """
+    try:
+        await session.execute(
+            text("SELECT set_config(:guc, '', false)"),
+            {"guc": _RLS_ADMIN_GUC},
+        )
+    except Exception as exc:  # noqa: BLE001
+        try:
+            from app.core.logging import get_logger
+            get_logger(__name__).warning(
+                "rls.reset_admin_failed", guc=_RLS_ADMIN_GUC, error=str(exc)
+            )
+        except Exception:  # noqa: BLE001
+            pass
 
 
 async def reset_rls_user(session: AsyncSession) -> None:

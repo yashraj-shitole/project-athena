@@ -36,6 +36,31 @@ _ALLOWED_INTERNAL_IMPLS = {
     "app.tools.builtin.search_documents:run",
 }
 
+# C-1 (Critical) — per-impl kwarg allowlist.
+#
+# The LLM (or a malicious user with a prompt-injection payload in a
+# retrieved chunk) can craft tool-call arguments that contain keys
+# the *implementation* does not expect: ``user_id``, ``session``, or
+# any future internal-only parameter. Python's ``**arguments`` will
+# happily forward them to the function, so the only way to keep the
+# privilege boundary tight is a per-impl allowlist enforced at the
+# registry level — *before* the function is called.
+#
+# Conventions:
+# * The keys listed here are the ONLY keys the LLM is allowed to
+#   supply. Everything else is silently dropped (and logged).
+# * The registry itself injects ``user_id`` and ``session`` from
+#   the caller — those keys are NEVER in the LLM-visible allowlist.
+#   This is the single source of truth for the privilege invariant.
+# * If you add a new internal impl, add an entry here. There is no
+#   default — the absence of an entry means the tool is rejected
+#   (see ``_INTERNAL_IMPL_KWARGS.get(impl) is None`` below).
+_INTERNAL_IMPL_KWARGS: dict[str, frozenset[str]] = {
+    "app.tools.builtin.search_documents:run": frozenset(
+        {"keywords", "top_k"}
+    ),
+}
+
 
 # ---------- registry snapshots ----------
 async def list_enabled(session: AsyncSession) -> list[Tool]:
@@ -128,7 +153,33 @@ async def select_subset(
 
 
 # ---------- execution ----------
-async def _run_internal(tool: Tool, arguments: dict) -> dict:
+async def _run_internal(
+    tool: Tool,
+    arguments: dict,
+    *,
+    user_id: uuid.UUID,
+    session: AsyncSession,
+) -> dict:
+    """Call an internal tool implementation with the privilege
+    invariant applied.
+
+    C-1 (Critical) — the registry, not the orchestrator, owns the
+    *single* path that injects ``user_id`` and ``session`` into a
+    tool call. The caller (orchestrator / tools route) cannot smuggle
+    a different ``user_id`` through ``arguments`` because:
+
+    1. The per-impl allowlist (``_INTERNAL_IMPL_KWARGS``) does NOT
+       contain ``user_id`` or ``session`` — the LLM never sees
+       them in its tool schema, and any caller-supplied value is
+       stripped before the function is called.
+    2. The registry force-overwrites both keys from the
+       authenticated session, regardless of what the caller passed.
+
+    The implementation enforces both rules. If you add a new
+    internal tool, add its allowlist entry; if you add a new
+    privilege-bearing kwarg, declare it as *not* in the allowlist
+    and inject it here.
+    """
     impl_path: str = (tool.handler_cfg or {}).get("impl", "")
     if not impl_path or not _IMPL_RE.match(impl_path):
         raise ValueError(f"Internal tool '{tool.name}' has an invalid handler_cfg.impl")
@@ -138,10 +189,38 @@ async def _run_internal(tool: Tool, arguments: dict) -> dict:
         raise ValueError(
             f"Internal tool '{tool.name}' impl '{impl_path}' is not allowed"
         )
+
+    # Per-impl kwarg allowlist — drop anything the LLM supplied
+    # that the implementation is not expecting. ``user_id`` and
+    # ``session`` are never in the allowlist, so a caller cannot
+    # smuggle them through ``arguments`` even if it tries.
+    allowed = _INTERNAL_IMPL_KWARGS.get(impl_path)
+    if allowed is None:
+        # No allowlist entry → no allowed kwargs. This is a
+        # developer-time fail-closed: a new internal tool that
+        # hasn't been explicitly allowlisted cannot be invoked.
+        raise ValueError(
+            f"Internal tool '{tool.name}' impl '{impl_path}' has no "
+            "kwarg allowlist registered"
+        )
+    filtered: dict[str, Any] = {k: v for k, v in (arguments or {}).items() if k in allowed}
+    dropped = sorted(set((arguments or {}).keys()) - allowed)
+    if dropped:
+        log.warning(
+            "tool.internal_kwargs_dropped",
+            tool=tool.name,
+            impl=impl_path,
+            dropped=dropped,
+        )
+
     mod_name, fn_name = impl_path.split(":", 1)
     mod = importlib.import_module(mod_name)
     fn: Callable[..., Awaitable[dict]] = getattr(mod, fn_name)
-    return await fn(**arguments)
+    # Force-inject the privilege-bearing kwargs AFTER the filter,
+    # so they cannot be dropped or overridden.
+    filtered["user_id"] = str(user_id)
+    filtered["session"] = session
+    return await fn(**filtered)
 
 
 async def _run_http(tool: Tool, arguments: dict) -> dict:
@@ -187,11 +266,18 @@ async def execute(
     *,
     tool_name: str,
     arguments: dict,
+    user_id: uuid.UUID | None = None,
 ) -> tuple[Tool | None, dict, str, int]:
     """Run a registered tool.
 
     Returns: (Tool, result_dict, status, latency_ms)
     status ∈ {"ok", "error", "fallback"}
+
+    C-1 — ``user_id`` is required for ``handler_type='internal'``;
+    the registry will reject the call with a clear error if it is
+    None. The HTTP and MCP handler types don't need it (they are
+    stateless), but accepting it as a parameter keeps the call
+    shape uniform across handlers.
     """
     tool = await get_by_name(session, tool_name)
     start = time.perf_counter()
@@ -199,7 +285,14 @@ async def execute(
         return None, {"error": f"tool_not_found: {tool_name}"}, "error", 0
     try:
         if tool.handler_type == "internal":
-            out = await _run_internal(tool, arguments)
+            if user_id is None:
+                raise ValueError(
+                    f"Internal tool '{tool_name}' requires a user_id; "
+                    "the route layer must pass the authenticated user."
+                )
+            out = await _run_internal(
+                tool, arguments, user_id=user_id, session=session
+            )
         elif tool.handler_type == "http":
             out = await _run_http(tool, arguments)
         elif tool.handler_type == "mcp":

@@ -13,6 +13,7 @@ from fastapi import (
     File,
     HTTPException,
     Query,
+    Request,
     Response,
     UploadFile,
     status,
@@ -493,6 +494,7 @@ async def list_document_chunks(
     "/{doc_id}",
     status_code=status.HTTP_204_NO_CONTENT,
     response_class=Response,
+    response_model=None,
 )
 async def delete_document(
     doc_id: uuid.UUID,
@@ -524,6 +526,7 @@ async def delete_document(
 @router.get("/{doc_id}/events")
 async def document_events(
     doc_id: uuid.UUID,
+    request: Request,
     user_id: CurrentUserId,
     session: DbSession,
 ) -> StreamingResponse:
@@ -544,6 +547,13 @@ async def document_events(
       PROGRESS  mid-stage {stage, current, total, percent}
       TERMINAL  final event; SSE stream closes after this
     """
+    # M-22 — same SSE Origin check as /api/chat/stream. EventSource
+    # is the prototypical "no preflight" cross-origin vector: a
+    # third-party page can open an EventSource directly without a
+    # CORS preflight, so the CORSMiddleware cannot refuse the
+    # request. We do it here.
+    _check_sse_origin(request)
+
     res = await session.execute(
         select(Document).where(
             Document.id == doc_id, Document.user_id == user_id
@@ -609,6 +619,12 @@ async def document_events(
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
             "X-Accel-Buffering": "no",
+            # M-23 — Vary on Accept so a JSON-asking client does not
+            # get a stream response (and vice versa) from a shared
+            # cache, and on Origin so the Origin check above is
+            # not defeated by a cache that served the stream
+            # response to a different origin.
+            "Vary": "Accept, Origin",
         },
     )
 
@@ -689,3 +705,41 @@ async def retry_document(
 
     background.add_task(_run_ingest, doc.id, user_id, doc.storage_path)
     return doc
+
+
+# ---------------------------------------------------------------------
+# M-22 — SSE Origin check helper (mirrors the one in app/api/chat.py).
+# Kept local so the documents router stays self-contained; the chat
+# helper covers /api/chat/stream and this one covers /api/documents/{id}/events.
+# ---------------------------------------------------------------------
+def _check_sse_origin(request: Request) -> None:
+    """Reject SSE connections whose Origin is not on the CORS allowlist.
+
+    See ``app/api/chat.py::_check_sse_origin`` for the rationale. In
+    short: EventSource does not send a CORS preflight, so the
+    CORSMiddleware cannot stop a cross-origin stream — the route
+    must do it.
+    """
+    origin = request.headers.get("origin")
+    if not origin:
+        return  # non-browser; auth gate handles it
+    from app.core.config import get_settings  # local import to avoid cycles
+
+    settings = get_settings()
+    allowed = {o.strip().rstrip("/").lower() for o in settings.cors_origins}
+    if origin.strip().rstrip("/").lower() in allowed:
+        return
+    host = request.headers.get("host", "")
+    if host and origin.lower().endswith(f"//{host.lower()}"):
+        return
+    log = get_logger(__name__)
+    log.warning(
+        "sse.origin_rejected",
+        origin=origin,
+        host=host,
+        path=request.url.path,
+    )
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="Origin not allowed for SSE.",
+    )

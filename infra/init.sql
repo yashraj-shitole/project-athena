@@ -15,8 +15,18 @@ CREATE TABLE IF NOT EXISTS users (
     password_hash TEXT NOT NULL,
     is_active     BOOLEAN NOT NULL DEFAULT TRUE,
     token_version INT NOT NULL DEFAULT 0,
+    -- H-19 — account-scoped lockout. See
+    -- ``backend/app/models/user.py`` and ``backend/app/api/auth.py``
+    -- for the policy. The ``ADD COLUMN IF NOT EXISTS`` keeps the
+    -- init idempotent for the dev DB and any pre-existing deploy.
+    failed_login_count INT NOT NULL DEFAULT 0,
+    locked_until       TIMESTAMPTZ,
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+-- Belt-and-braces: idempotent column add for environments where the
+-- table already exists from an older init.sql (Phase 1 / pre-H-19).
+ALTER TABLE users ADD COLUMN IF NOT EXISTS failed_login_count INT NOT NULL DEFAULT 0;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS locked_until       TIMESTAMPTZ;
 
 -- ---------------------------------------------------------------------
 -- TOOLS REGISTRY
@@ -158,6 +168,21 @@ ALTER TABLE tool_calls       FORCE ROW LEVEL SECURITY;
 CREATE OR REPLACE FUNCTION athena_current_user() RETURNS uuid
 LANGUAGE sql STABLE AS $$
     SELECT NULLIF(current_setting('app.current_user_id', TRUE), '')::uuid
+$$;
+
+-- H-2 (High) — admin predicate. A caller is "admin" iff the
+-- application set the ``app.is_admin`` GUC to ``TRUE`` *and* the
+-- caller's email is in the allowlist. The allowlist is consulted
+-- here, not in the policy body, so the GUC cannot be flipped by a
+-- non-admin session.
+--
+-- The GUC is set by ``app/api/dependencies.py::require_admin``
+-- (which already gates the /api/tools endpoints). Until that
+-- wiring is added, the function returns FALSE for every caller —
+-- the policy degrades to the same behavior as ``user_id = me``.
+CREATE OR REPLACE FUNCTION athena_is_admin() RETURNS boolean
+LANGUAGE sql STABLE AS $$
+    SELECT COALESCE(NULLIF(current_setting('app.is_admin', TRUE), ''), 'false')::boolean
 $$;
 
 DROP POLICY IF EXISTS docs_iso   ON documents;
@@ -307,13 +332,63 @@ DROP POLICY IF EXISTS connectors_iso ON model_connectors;
 DROP POLICY IF EXISTS audit_iso      ON connector_audit_log;
 DROP POLICY IF EXISTS usage_iso      ON connector_usage;
 
--- Owners see their rows; everyone sees admin-shared rows.
-CREATE POLICY connectors_iso ON model_connectors
-    USING (user_id = athena_current_user() OR is_admin = TRUE)
-    WITH CHECK (user_id = athena_current_user() OR is_admin = TRUE);
+-- H-2 (High) — split the connector visibility policy.
+--
+-- The previous policy was a single ``connectors_iso`` with
+-- ``USING (user_id = me OR is_admin = TRUE)``. That meant
+-- *any* row with ``is_admin=TRUE`` was globally visible — and
+-- the route layer accepted ``is_admin=True`` from a non-admin
+-- caller, which is C-2 (Critical). The route guard in
+-- ``app/api/connectors.py`` blocks the create-time promotion,
+-- but we want defense in depth at the database layer too.
+--
+-- The new design: two additive policies.
+--
+-- * ``connectors_owner`` — the owner sees their row, and the
+--   owner can write (INSERT/UPDATE) only their own row. This
+--   policy is sufficient to *block* the C-2 escalation: even
+--   if a non-admin somehow wrote ``is_admin=true`` to a row,
+--   the policy's ``WITH CHECK`` clause refuses to allow it
+--   when ``athena_is_admin()`` is false.
+-- * ``connectors_admin`` — a caller that is admin (per
+--   ``athena_is_admin()``) sees admin-shared rows; a non-admin
+--   caller sees no such rows. The ``WITH CHECK`` clause means
+--   only an admin can *write* ``is_admin=true`` to a row.
+--
+-- The end result: a non-admin can never SELECT or WRITE a row
+-- with ``is_admin=true``, regardless of what the application
+-- layer does.
+DROP POLICY IF EXISTS connectors_owner ON model_connectors;
+DROP POLICY IF EXISTS connectors_admin ON model_connectors;
+CREATE POLICY connectors_owner ON model_connectors
+    USING (user_id = athena_current_user())
+    WITH CHECK (user_id = athena_current_user() AND NOT is_admin);
+CREATE POLICY connectors_admin ON model_connectors
+    USING (is_admin = TRUE AND athena_is_admin())
+    WITH CHECK (is_admin = TRUE AND athena_is_admin());
 CREATE POLICY audit_iso ON connector_audit_log
     USING (user_id = athena_current_user())
     WITH CHECK (user_id = athena_current_user());
 CREATE POLICY usage_iso ON connector_usage
     USING (user_id = athena_current_user())
     WITH CHECK (user_id = athena_current_user());
+
+-- ---------------------------------------------------------------------
+-- Tools: RLS-protect (M-29, Medium)
+--
+-- Before this change, the ``tools`` table was readable by every
+-- authenticated user. ``handler_cfg`` contains the admin-set URL
+-- for HTTP/MCP tools — disclosing it leaks the operator's
+-- internal endpoints to every tenant.
+--
+-- The new policy: everyone sees builtin tools (the system
+-- exposes these to the LLM regardless of who the caller is);
+-- non-builtin tools are only visible to admins.
+-- ---------------------------------------------------------------------
+ALTER TABLE tools ENABLE ROW LEVEL SECURITY;
+ALTER TABLE tools FORCE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS tools_iso ON tools;
+CREATE POLICY tools_iso ON tools
+    USING (is_builtin = TRUE OR athena_is_admin())
+    WITH CHECK (is_builtin = TRUE OR athena_is_admin());

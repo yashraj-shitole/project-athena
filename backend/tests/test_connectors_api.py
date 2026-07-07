@@ -119,6 +119,76 @@ def test_update_empty_api_key_string_is_legal():
     assert u.api_key == ""
 
 
+# --- Mass-assignment + privilege-escalation guards (C-2, H-22) -----------
+
+def test_update_schema_rejects_is_admin():
+    """C-2 / H-22 — the PATCH schema must NOT accept ``is_admin``.
+
+    The ``connectors_iso`` RLS policy is
+    ``user_id = me OR is_admin = TRUE``. If the PATCH schema
+    re-introduces ``is_admin``, a non-admin user can flip the
+    flag and promote their row into the global visibility set.
+    The route layer has a defense-in-depth check, but the schema
+    is the primary line of defense: an unknown field is rejected
+    with 422 before the route runs.
+    """
+    field_names = set(ModelConnectorUpdate.model_fields.keys())
+    assert "is_admin" not in field_names, (
+        "ModelConnectorUpdate must not accept is_admin — see C-2."
+    )
+
+
+def test_create_schema_rejects_extra_fields():
+    """H-22 — ``extra='forbid'`` is inherited from ``RequestBase``.
+
+    A request that smuggles a field the schema does not declare
+    (e.g. ``user_id``, ``is_admin`` via the wrong shape) is
+    rejected with a Pydantic ValidationError.
+    """
+    import pytest
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError) as exc:
+        ModelConnectorCreate(
+            name="x",
+            provider=PROVIDER_OPENAI_COMPAT,
+            base_url="https://example.com",
+            default_model="m",
+            # A field the schema does not declare.
+            attacker_field="pwn",
+        )
+    assert "attacker_field" in str(exc.value)
+
+
+def test_update_schema_rejects_extra_fields():
+    """H-22 — same protection on the PATCH shape."""
+    import pytest
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError) as exc:
+        ModelConnectorUpdate(
+            # A field the schema does not declare.
+            is_admin=True,
+        )
+    assert "is_admin" in str(exc.value)
+
+
+def test_test_request_rejects_extra_fields():
+    """H-22 — the test-shape schema is also strict."""
+    import pytest
+    from pydantic import ValidationError
+    from app.schemas.connector import TestRequest
+
+    with pytest.raises(ValidationError) as exc:
+        TestRequest(
+            provider=PROVIDER_OPENAI_COMPAT,
+            base_url="https://example.com",
+            default_model="m",
+            is_admin=True,
+        )
+    assert "is_admin" in str(exc.value)
+
+
 # --- Secret-leakage contract --------------------------------------------
 
 def test_public_schema_has_no_api_key_field():

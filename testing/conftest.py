@@ -39,7 +39,7 @@ os.environ["ATHENA_CONNECTOR_KEY"] = _REAL_FERNET_KEY
 os.environ.setdefault("ATHENA_DATABASE_URL", "sqlite+aiosqlite:///:memory:")
 os.environ.setdefault("ATHENA_REDIS_URL", "redis://localhost:6379/0")
 os.environ.setdefault("ATHENA_OLLAMA_URL", "http://localhost:11434")
-os.environ.setdefault("ATHENA_JWT_SECRET", "test-secret")
+os.environ.setdefault("ATHENA_JWT_SECRET", "test-secret-32-bytes-or-more-please!")
 # Per-process temp storage dir.
 os.environ.setdefault(
     "ATHENA_STORAGE_DIR", str(Path("/tmp") / f"athena-testing-{os.getpid()}")

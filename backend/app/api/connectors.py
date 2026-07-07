@@ -30,11 +30,12 @@ from __future__ import annotations
 import uuid
 from typing import Any, List, Optional
 
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, HTTPException, Query, Request, Response, status
 from sqlalchemy import select
 
 from app.api._connector_helpers import to_public
 from app.api.dependencies import CurrentUserId, DbSession
+from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.core.ssrf import assert_safe_url
 from app.models.connector import (
@@ -60,6 +61,22 @@ from app.services.providers.base import ProviderError
 
 log = get_logger(__name__)
 router = APIRouter(prefix="/api/connectors", tags=["connectors"])
+
+
+# L-31 — extract the client IP and user agent for the audit log.
+# We trust X-Forwarded-For when the operator has configured the
+# reverse proxy to set it (see infra/nginx.conf). The first entry
+# is the original client; the rest are the proxy chain.
+def _client_ip_ua(request: Request) -> tuple[str | None, str | None]:
+    xff = request.headers.get("x-forwarded-for")
+    if xff:
+        ip = xff.split(",")[0].strip()[:64]
+    elif request.client is not None:
+        ip = request.client.host[:64]
+    else:
+        ip = None
+    ua = (request.headers.get("user-agent") or "")[:500] or None
+    return ip, ua
 
 
 # --- Templates (sane defaults per provider) -----------------------------
@@ -172,6 +189,7 @@ async def list_connectors(
 )
 async def create_connector(
     payload: ModelConnectorCreate,
+    request: Request,
     user_id: CurrentUserId,
     session: DbSession,
 ) -> ModelConnectorPublic:
@@ -179,15 +197,41 @@ async def create_connector(
     # anything. `allow_loopback=True` for self-hosted Ollama etc.
     assert_safe_url(payload.base_url, allow_loopback=True)
 
-    # Admin-shared rows are only creatable by admins; the route
-    # checks the `is_admin` flag. Phase 1's auth layer doesn't
-    # carry a "current user is admin" flag, so the user_id is the
-    # only thing we record on the row — admin rows are typically
-    # created via an admin tool / script in Phase 2.
+    # C-2 (Critical) — admin-shared rows are create-only and
+    # admin-gated. The ``connectors_iso`` RLS policy is
+    # ``user_id = me OR is_admin = TRUE`` — flipping the flag
+    # promotes the row into the global visibility set, and the
+    # router will then route every other user's chat traffic to
+    # this connector (since ``is_default AND is_admin`` wins over
+    # per-user default). Reject ``is_admin=True`` from any caller
+    # that is not in the admin allowlist.
     if payload.is_admin:
-        # The Pydantic model already accepts `is_admin`; the route
-        # *permits* it. Phase 2 will gate this behind AdminUser.
-        pass
+        settings = get_settings()
+        admin_allow = {
+            e.strip().lower() for e in settings.admin_emails if e.strip()
+        }
+        # Look up the caller's email. We can't use the AdminUser dep
+        # here without restructuring the route, so we mirror the
+        # same check inline. (The dep is used in app/api/tools.py.)
+        from sqlalchemy import select
+
+        from app.models.user import User
+
+        res = await session.execute(
+            select(User.email).where(User.id == user_id)
+        )
+        caller_email = (res.scalar_one_or_none() or "").lower()
+        if not admin_allow or caller_email not in admin_allow:
+            log.warning(
+                "connector.is_admin_blocked",
+                actor=str(user_id),
+                actor_email=caller_email,
+                action="create",
+            )
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Only administrators may create admin-shared connectors.",
+            )
 
     api_key_enc: Optional[bytes] = None
     api_key_preview: Optional[str] = None
@@ -228,12 +272,15 @@ async def create_connector(
         # per user.
         await _clear_user_default(session, user_id, except_id=row.id)
 
+    _ip, _ua = _client_ip_ua(request)
     await audit.record(
         session,
         connector_id=row.id,
         user_id=user_id,
         action=audit.ACTION_CREATE,
         after=_public_dict(row),
+        ip=_ip,
+        user_agent=_ua,
     )
     await session.commit()
     await session.refresh(row)
@@ -280,6 +327,7 @@ async def get_connector(
 async def update_connector(
     connector_id: uuid.UUID,
     payload: ModelConnectorUpdate,
+    request: Request,
     user_id: CurrentUserId,
     session: DbSession,
 ) -> ModelConnectorPublic:
@@ -303,11 +351,66 @@ async def update_connector(
     if "base_url" in data and data["base_url"]:
         assert_safe_url(data["base_url"], allow_loopback=True)
         row.base_url = data["base_url"]
+
+    # H-22 (High) — explicit allowlist replaces the
+    # ``for k, v in data.items(): if hasattr(row, k): setattr(...)``
+    # pattern. The old loop was a mass-assignment surface: any
+    # column the ORM row knew about could be overwritten by the
+    # caller. We have already removed ``is_admin`` from
+    # ``ModelConnectorUpdate`` (the schema), but defense in depth
+    # means the route *also* refuses to set it.
+    _UPDATABLE_FIELDS = frozenset(
+        {
+            "name",
+            "provider",
+            "auth_type",
+            "auth_header_name",
+            "organization_id",
+            "project_id",
+            "api_version",
+            "custom_headers",
+            "default_model",
+            "models",
+            "capabilities",
+            "settings",
+            "is_enabled",
+            "is_default",
+            "group_name",
+            "tags",
+            "is_favorite",
+        }
+    )
     for k, v in data.items():
-        if hasattr(row, k) and k not in ("api_key",):
+        if k in _UPDATABLE_FIELDS:
             setattr(row, k, v)
+        elif k == "is_admin":
+            # Belt-and-braces: the schema no longer accepts this
+            # field, but if a future schema change re-introduces
+            # it, refuse to write it. Admin-shared promotion is
+            # create-only.
+            log.warning(
+                "connector.is_admin_update_blocked",
+                actor=str(user_id),
+                connector_id=str(row.id),
+            )
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="is_admin cannot be modified via PATCH.",
+            )
+        # Other unknown fields are silently dropped — Pydantic's
+        # ``extra="forbid"`` on the schema will already have
+        # rejected them with a 422. We log at debug for forensic
+        # visibility.
+        else:
+            log.debug(
+                "connector.update_unknown_field",
+                actor=str(user_id),
+                connector_id=str(row.id),
+                field=k,
+            )
     if data.get("is_default"):
         await _clear_user_default(session, user_id, except_id=row.id)
+    _ip, _ua = _client_ip_ua(request)
     await audit.record(
         session,
         connector_id=row.id,
@@ -315,6 +418,8 @@ async def update_connector(
         action=audit.ACTION_UPDATE,
         before=before,
         after=_public_dict(row),
+        ip=_ip,
+        user_agent=_ua,
     )
     await session.commit()
     await session.refresh(row)
@@ -324,10 +429,12 @@ async def update_connector(
 @router.delete(
     "/{connector_id}",
     status_code=status.HTTP_204_NO_CONTENT,
-    response_class=None,
+    response_class=Response,
+    response_model=None,
 )
 async def delete_connector(
     connector_id: uuid.UUID,
+    request: Request,
     user_id: CurrentUserId,
     session: DbSession,
 ) -> None:
@@ -343,12 +450,15 @@ async def delete_connector(
     row.deleted_at = datetime.now(timezone.utc)
     if row.is_default:
         row.is_default = False
+    _ip, _ua = _client_ip_ua(request)
     await audit.record(
         session,
         connector_id=row.id,
         user_id=user_id,
         action=audit.ACTION_DELETE,
         before=before,
+        ip=_ip,
+        user_agent=_ua,
     )
     await session.commit()
 
@@ -362,6 +472,7 @@ async def delete_connector(
 )
 async def clone_connector(
     connector_id: uuid.UUID,
+    request: Request,
     user_id: CurrentUserId,
     session: DbSession,
 ) -> ModelConnectorPublic:
@@ -394,6 +505,7 @@ async def clone_connector(
     )
     session.add(new_row)
     await session.flush()
+    _ip, _ua = _client_ip_ua(request)
     await audit.record(
         session,
         connector_id=new_row.id,
@@ -401,6 +513,8 @@ async def clone_connector(
         action=audit.ACTION_CLONE,
         before=_public_dict(row),
         after=_public_dict(new_row),
+        ip=_ip,
+        user_agent=_ua,
     )
     await session.commit()
     await session.refresh(new_row)
@@ -413,6 +527,7 @@ async def clone_connector(
 )
 async def set_default(
     connector_id: uuid.UUID,
+    request: Request,
     user_id: CurrentUserId,
     session: DbSession,
 ) -> SetDefaultResponse:
@@ -424,12 +539,15 @@ async def set_default(
         )
     row.is_default = True
     await _clear_user_default(session, user_id, except_id=row.id)
+    _ip, _ua = _client_ip_ua(request)
     await audit.record(
         session,
         connector_id=row.id,
         user_id=user_id,
         action=audit.ACTION_SET_DEFAULT,
         after=_public_dict(row),
+        ip=_ip,
+        user_agent=_ua,
     )
     await session.commit()
     await session.refresh(row)
@@ -463,13 +581,29 @@ def _build_adapter_from_payload(payload: TestRequest):
 
 
 @router.post("/test", response_model=HealthCheckResult)
-async def test_connector(payload: TestRequest) -> HealthCheckResult:
+async def test_connector(
+    payload: TestRequest,
+    user_id: CurrentUserId,
+) -> HealthCheckResult:
     """Run a health probe against a connector config without saving.
 
     Used by the UI's "Test" button when the user is filling in the
     create form. The probe calls `health_check()` on a freshly
     constructed adapter, then closes it.
+
+    M-27 — auth requirement. A probe is functionally a request to
+    our own egress, so an unauthenticated caller could use it as
+    an SSRF oracle (probe ``http://169.254.169.254/`` to confirm
+    the cloud metadata endpoint exists; probe internal services
+    to map the network). The check on the URL is
+    ``allow_loopback=True`` for dev; a non-loopback probe is
+    fine if the caller is authenticated. We require a JWT.
     """
+    # M-27 — the request must be authenticated. The probe runs
+    # against an arbitrary URL the caller chose; this is the same
+    # risk surface as creating a connector, and create requires
+    # auth. We do not call into the DB here; we only need a valid
+    # JWT, not a particular user state.
     assert_safe_url(payload.base_url, allow_loopback=True)
     adapter = _build_adapter_from_payload(payload)
     try:
@@ -540,6 +674,7 @@ async def list_models(
 )
 async def refresh_models(
     connector_id: uuid.UUID,
+    request: Request,
     user_id: CurrentUserId,
     session: DbSession,
 ) -> List[str]:
@@ -583,12 +718,15 @@ async def refresh_models(
             pass
     row.discovered_models = ids
     row.discovered_at = datetime.now(timezone.utc)
+    _ip, _ua = _client_ip_ua(request)
     await audit.record(
         session,
         connector_id=row.id,
         user_id=user_id,
         action=audit.ACTION_REFRESH_MODELS,
         after={"models": ids},
+        ip=_ip,
+        user_agent=_ua,
     )
     await session.commit()
     return ids

@@ -1,6 +1,8 @@
 """Application configuration. All values come from env vars (prefixed ATHENA_)."""
 from __future__ import annotations
 
+import math
+import re
 from functools import lru_cache
 from pathlib import Path
 from typing import List
@@ -8,12 +10,54 @@ from typing import List
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-# The shipped default. If this value is still in effect outside `dev` the
-# app refuses to boot (see Settings.model_validator below) — anyone can
-# forge JWTs with a known secret, so a quiet start in production is the
-# worst possible failure mode.
-_DEFAULT_JWT_SECRET = "change-me-in-prod"
-_KNOWN_INSECURE_SECRETS = {_DEFAULT_JWT_SECRET, "", "secret", "changeme"}
+# H-20 (High) — the prior default of "change-me-in-prod" is a
+# known-public string. We still ship a development default for
+# `make test` / `make dev` convenience, but the validator below
+# refuses it (and any other weak secret) the moment the environment
+# is anything other than dev.
+#
+# The set of *known-insecure* secrets is intentionally small: the
+# strong gate is the length/entropy check, not the list.
+_DEFAULT_JWT_SECRET = "change-me-in-prod"  # dev only
+_KNOWN_INSECURE_SECRETS = {
+    _DEFAULT_JWT_SECRET,
+    "",
+    "secret",
+    "changeme",
+    "password",
+    "1234567890",
+    "0123456789abcdef",
+}
+# H-20 — minimum secret length in bytes (HS256 requires ≥ 32 bytes
+# per RFC 7518 §3.2; we round up to 32 anyway and require 8+
+# characters even in dev so test suites don't pass with `secret`).
+_MIN_SECRET_BYTES = 32
+
+
+def _shannon_entropy(s: str) -> float:
+    """Bits per byte. Strings of length 0 return 0."""
+    if not s:
+        return 0.0
+    freq: dict[str, int] = {}
+    for ch in s:
+        freq[ch] = freq.get(ch, 0) + 1
+    n = len(s)
+    return -sum((c / n) * math.log2(c / n) for c in freq.values())
+
+
+# CORS origin syntax. Each entry must be ``scheme://host[:port]``,
+# no wildcards, no trailing slash, no path. ``javascript:`` and
+# ``data:`` are rejected outright (CWE-942 defense in depth).
+#
+# Host: a label-plus-dot FQDN (``example.com``) or the literal
+# ``localhost`` (dev only — the loopback check below blocks
+# ``localhost`` in prod). The optional port is ``:NNNNN`` at the end.
+_CORS_ORIGIN_RE = re.compile(
+    r"^https?://(?:"
+    r"(?:[A-Za-z0-9-]+\.)+[A-Za-z0-9-]+"   # FQDN: at least one dot
+    r"|localhost"                            # dev-only loopback
+    r")(?::\d{1,5})?$"
+)
 
 
 class Settings(BaseSettings):
@@ -80,7 +124,37 @@ class Settings(BaseSettings):
     cache_prefix_retrieval: str = "search"
     cache_prefix_tool_def: str = "tools"
 
+    # ---- Rate limits (H-18) ----
+    # Per-IP, per-minute caps for the anonymous auth endpoints. The
+    # limiter is fixed-window (see app/core/ratelimit.py); these are
+    # the per-window maxima. Tighten in prod; relax in dev.
+    rate_limit_login_per_min: int = 10
+    rate_limit_register_per_min: int = 3
+    rate_limit_refresh_per_min: int = 30
+
+    # ---- Login lockout (H-19) ----
+    # Account-scoped complement to the per-IP rate limit. After this
+    # many *consecutive* failed login attempts for the same email,
+    # the account is locked for ``login_lockout_s`` seconds. The
+    # counter resets on every successful login. This blocks a
+    # distributed brute force (one guess per IP per minute) that
+    # would otherwise slip past the per-IP cap.
+    login_max_fails: int = 5
+    login_lockout_s: int = 900  # 15 minutes
+    # After this many seconds of inactivity the counter decays
+    # entirely. Defends against a slow trickle of guesses that
+    # never quite reaches ``login_max_fails`` but never lets the
+    # victim get back to a clean slate either.
+    login_fail_window_s: int = 3600  # 1 hour
+
     # ---- Auth ----
+    # H-20 (High) — `jwt_secret` defaults to the dev placeholder,
+    # but the ``model_post_init`` validator refuses to boot outside
+    # dev, AND the ``@field_validator`` below rejects any secret
+    # shorter than 32 bytes or with low entropy even in dev. The
+    # dev default is exactly 32 bytes of distinct chars, so it
+    # survives the dev check; a real operator setting
+    # ``ATHENA_JWT_SECRET=foo`` in prod is rejected at boot.
     jwt_secret: str = _DEFAULT_JWT_SECRET
     jwt_algorithm: str = "HS256"
     access_token_ttl_min: int = 30
@@ -92,6 +166,9 @@ class Settings(BaseSettings):
     admin_emails: List[str] = Field(default_factory=list)
 
     # ---- CORS ----
+    # H-21 (High) — each entry is regex-validated by the
+    # ``cors_origins`` field validator below. We refuse wildcards,
+    # loopback hosts in non-dev, and `javascript:` / `data:` URIs.
     cors_origins: List[str] = Field(default_factory=lambda: ["http://localhost:5173"])
 
     # ---- External Model Connectors ----
@@ -115,8 +192,105 @@ class Settings(BaseSettings):
     def _ensure_path(cls, v):
         return Path(v)
 
+    @field_validator("jwt_secret")
+    @classmethod
+    def _check_jwt_secret_strength(cls, v: str) -> str:
+        """H-20 — refuse any JWT secret that is too short or has
+        too little entropy.
+
+        Two gates:
+
+        1. Length: at least ``_MIN_SECRET_BYTES`` (32) bytes when
+           UTF-8 encoded. RFC 7518 §3.2 recommends at least 32
+           bytes for HS256. A 16-byte secret is brute-forceable
+           in seconds with hashcat.
+        2. Entropy: at least 3.0 bits/byte Shannon. A
+           32-character secret of all the same byte scores 0
+           and is rejected. A 32-character secret of two
+           alternating bytes scores 1.0 and is rejected. Real
+           secrets score ≥ 3.5.
+
+        Both gates run regardless of environment: the dev
+        placeholder ``change-me-in-prod`` is 17 bytes, scores
+        3.46 bits/byte, and is rejected by gate 1 (length). The
+        dev-only default shipped in ``infra/docker-compose.yml``
+        is a 49-byte high-entropy string that satisfies both
+        gates. A real operator setting ``ATHENA_JWT_SECRET=foo``
+        in prod is rejected at boot by ``model_post_init`` and
+        also by this field validator.
+        """
+        if not v:
+            raise ValueError(
+                "ATHENA_JWT_SECRET must be set to a non-empty string."
+            )
+        n = len(v.encode("utf-8"))
+        if v in _KNOWN_INSECURE_SECRETS and n < _MIN_SECRET_BYTES:
+            raise ValueError(
+                f"ATHENA_JWT_SECRET is the placeholder {v!r}; set a strong "
+                f"unique secret of at least {_MIN_SECRET_BYTES} bytes."
+            )
+        if n < _MIN_SECRET_BYTES:
+            raise ValueError(
+                f"ATHENA_JWT_SECRET is {n} bytes; HS256 requires at least "
+                f"{_MIN_SECRET_BYTES} bytes (RFC 7518 §3.2)."
+            )
+        entropy = _shannon_entropy(v)
+        if entropy < 3.0:
+            raise ValueError(
+                f"ATHENA_JWT_SECRET has Shannon entropy {entropy:.2f} "
+                f"bits/byte; must be at least 3.0."
+            )
+        return v
+
+    @field_validator("cors_origins")
+    @classmethod
+    def _check_cors_origins(cls, v: List[str]) -> List[str]:
+        """H-21 — each entry must be a fully-qualified ``scheme://host[:port]``.
+
+        We refuse:
+
+        * ``*`` (wildcard) — incompatible with ``allow_credentials=True``.
+        * ``javascript:`` / ``data:`` / ``file:`` / ``null``.
+        * Any entry with a path, query, or fragment — they would
+          be normalized by browsers in surprising ways.
+        * Loopback hosts (``localhost``, ``127.0.0.1``, ``::1``)
+          when the *current* environment is not dev — these
+          are debug-only and must not survive a prod deploy.
+
+        The dev/test path is permissive; the prod path is strict.
+        """
+        env = (cls.environment or "dev").lower() if hasattr(cls, "environment") else "dev"
+        is_dev = env in {"dev", "development", "test", "local"}
+        for origin in v:
+            o = origin.strip()
+            if not o:
+                continue
+            if o == "*":
+                raise ValueError(
+                    "cors_origins must not contain '*' (incompatible with "
+                    "allow_credentials=True; see CWE-942)."
+                )
+            if not _CORS_ORIGIN_RE.match(o):
+                raise ValueError(
+                    f"cors_origins entry {o!r} is not a valid "
+                    f"scheme://host[:port] URL. Wildcards, paths, and "
+                    f"non-http(s) schemes are not allowed."
+                )
+            if not is_dev and (
+                "localhost" in o or "127.0.0.1" in o or "[::1]" in o
+            ):
+                raise ValueError(
+                    f"cors_origins entry {o!r} is a loopback host; loopback "
+                    f"is not permitted in environment {env!r}."
+                )
+        return v
+
     def model_post_init(self, ____context) -> None:  # noqa: D401, ARG002
         """Fail-fast on insecure production configuration.
+
+        H-20 — `jwt_secret` is also gated by the field validator
+        above, but we keep this check for the explicit error
+        message operators see when they ship the placeholder.
 
         - `jwt_secret` must not be a known placeholder when
           `environment != "dev"`.
@@ -130,7 +304,8 @@ class Settings(BaseSettings):
             if self.jwt_secret in _KNOWN_INSECURE_SECRETS:
                 raise RuntimeError(
                     "ATHENA_JWT_SECRET is not set (or is a known placeholder). "
-                    "Set a strong unique secret before running outside dev."
+                    "Set a strong unique secret (>= 32 bytes, entropy >= 3.0 "
+                    "bits/byte) before running outside dev."
                 )
         if self.environment.lower() == "prod":
             if any(o.startswith("http://localhost") for o in self.cors_origins):

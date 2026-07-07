@@ -139,11 +139,14 @@ services:
       ATHENA_OLLAMA_URL: http://ollama:11434
       ATHENA_OLLAMA_MODEL: ${ATHENA_OLLAMA_MODEL:-qwen2.5:1.5b-instruct}
       ATHENA_STORAGE_DIR: /app/storage
-      # No shipped default — must be set. config.py fail-fasts on the
-      # known-insecure value below in any non-dev environment, and the
-      # compose default is exactly that sentinel so forgetting to
-      # override it is loud rather than silent.
-      ATHENA_JWT_SECRET: ${ATHENA_JWT_SECRET:-change-me-in-prod}
+      # Dev-only default that satisfies the strength validator
+      # (>= 32 bytes, high entropy). The dev/CI environments are
+      # walled off from the public internet anyway. For any
+      # non-local deploy, set ATHENA_JWT_SECRET to a strong,
+      # unique secret via your .env file or orchestrator secrets.
+      # config.py fail-fasts on known-insecure values when
+      # ATHENA_ENV != dev/test.
+      ATHENA_JWT_SECRET: ${ATHENA_JWT_SECRET:-dev-only-jwt-secret-32-bytes-long-please-change-me-now}
       ATHENA_TOKEN_BUDGET: "3000"
       ATHENA_LOG_LEVEL: ${ATHENA_LOG_LEVEL:-INFO}
       # Comma-separated list of allowed origins. The default is a dev-only
@@ -153,6 +156,41 @@ services:
       ATHENA_ENV: ${ATHENA_ENV:-dev}
     volumes:
       - api_storage:/app/storage
+    # M-25 — container hardening:
+    # * ``read_only: true`` — the container's root filesystem is
+    #   immutable; only the storage volume and the OS-managed
+    #   tmpfs (below) are writable. A compromised API process
+    #   cannot write to /app, /etc, or anywhere else.
+    # * ``tmpfs`` for /tmp, /var/run, /root/.cache (the
+    #   sentence-transformers model cache).
+    # * ``security_opt`` drops the container's Linux
+    #   capabilities; ``no-new-privileges`` blocks setuid
+    #   binaries from re-acquiring capabilities.
+    # * ``pids_limit`` caps the process tree at 256 to blunt a
+    #   fork-bomb from a runaway dependency.
+    read_only: true
+    tmpfs:
+      - /tmp:size=128M,mode=1777
+      - /var/run:size=16M,mode=0755
+      - /root/.cache:size=512M,mode=0755
+      # M-25 (revised) — allow `pip install --user` for ad-hoc
+      # debugging tools (e.g. ``debugpy`` to attach a remote
+      # debugger). The user's site-packages land in
+      # ``/home/athena/.local``; without this tmpfs the read-only
+      # rootfs blocks the install (Errno 30). The mount is 256M,
+      # capped at the api container's own uid, and is wiped on
+      # every container restart — so any tool installed at
+      # runtime has to be re-installed for each debugging
+      # session, which is exactly the dev-loop we want (no
+      # surprise tools surviving into a fresh boot).
+      - /home/athena/.local:size=256M,uid=1000,gid=1000,mode=0755
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE  # uvicorn binds :8000
+    pids_limit: 256
     # Loopback-only — direct API access is for local debugging only.
     ports:
       - "127.0.0.1:8000:8000"

@@ -164,23 +164,17 @@ async def invoke_tool(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail="Tool is disabled"
         )
-    # Inject the DB session for internal tools that need it (search_documents).
-    if tool.handler_type == "internal":
-        impl: str = (tool.handler_cfg or {}).get("impl", "")
-        if impl.endswith("search_documents:run"):
-            arguments = dict(arguments or {})
-            # Force-overwrite (NOT setdefault): a caller-supplied user_id
-            # must never survive — it would re-bind the RLS GUC to a
-            # different tenant and leak their documents.
-            if arguments.get("user_id") not in (None, str(admin.id)):
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="user_id may not be supplied in arguments.",
-                )
-            arguments["user_id"] = str(admin.id)
-            arguments["session"] = session
+    # C-1 (Critical) — the registry owns the privilege invariant.
+    # The previous code path force-injected ``user_id`` and
+    # ``session`` here; the new design (see
+    # ``app/tools/registry.py::_run_internal``) does it once, in a
+    # single place, behind a per-impl kwarg allowlist. We just
+    # thread the admin's id through.
     executed, result, status_label, latency_ms = await tool_registry.execute(
-        session, tool_name=tool.name, arguments=arguments or {}
+        session,
+        tool_name=tool.name,
+        arguments=arguments or {},
+        user_id=admin.id,
     )
     return {
         "tool_id": str(executed.id) if executed else str(tool.id),
