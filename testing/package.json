@@ -12,7 +12,7 @@
     "test:js": "vitest run"
   },
   "devDependencies": {
-    "vitest": "^2.0.0",
+    "vitest": "^4.1.10",
     "@testing-library/react": "^16.0.0",
     "@testing-library/jest-dom": "^6.5.0",
     "@playwright/test": "^1.48.0",
