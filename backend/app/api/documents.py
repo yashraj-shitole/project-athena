@@ -241,6 +241,19 @@ async def upload_document(
     await invalidate_user(str(user_id))
 
     # Kick off the ingestion pipeline in the background.
+    # ------------------------------------------------------------------
+    # Future-worker seam
+    # ------------------
+    # The pipeline runs in-process via FastAPI's `BackgroundTasks`
+    # (this is the current deployment model: same process, no broker,
+    # no extra latency). The only swap to a real worker + Redis /
+    # RabbitMQ queue is to replace this one line with
+    # `await queue.enqueue("ingest_document", args=(doc_id, user_id, str(storage_path)))`
+    # — the closure body of `_run_ingest` is unchanged, and the
+    # in-process event bus in `app/services/ingestion/events.py` is
+    # already a thin pub/sub shim that swaps to Redis pub/sub the
+    # same way (see the comment at the top of that module).
+    # ------------------------------------------------------------------
     background.add_task(_run_ingest, doc_id, user_id, str(storage_path))
     return doc
 
@@ -703,6 +716,9 @@ async def retry_document(
     if await events.is_terminal(doc_id):
         await events.reopen(doc_id)
 
+    # Future-worker seam: same as the upload path above — replace
+    # `add_task(...)` with `queue.enqueue(...)` to move to a real
+    # worker. The closure body of `_run_ingest` is unchanged.
     background.add_task(_run_ingest, doc.id, user_id, doc.storage_path)
     return doc
 

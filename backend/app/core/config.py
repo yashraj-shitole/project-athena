@@ -114,6 +114,12 @@ class Settings(BaseSettings):
     keyword_top_n: int = 8
     embedding_model_name: str = "sentence-transformers/all-MiniLM-L6-v2"
     keyword_min_sim: float = 0.15  # cosine threshold for keyword on-topic filter
+    # Size of the per-batch embed + keyword-encoder + COPY window.
+    # 32 chunks × ~300 tokens ≈ 9.6k tokens per encoder forward
+    # pass — well within the all-MiniLM-L6-v2 sweet spot. Larger
+    # batches trade memory for fewer per-batch overheads; the perf
+    # script overrides this.
+    ingest_embed_batch_size: int = 32
 
     # ---- Retrieval ----
     retrieval_top_k: int = 4
@@ -394,6 +400,10 @@ class Settings(BaseSettings):
     @property
     def KEYWORD_TOP_N(self) -> int:
         return self.keyword_top_n
+
+    @property
+    def INGEST_EMBED_BATCH_SIZE(self) -> int:
+        return self.ingest_embed_batch_size
 
     @property
     def RETRIEVAL_TOP_K(self) -> int:
