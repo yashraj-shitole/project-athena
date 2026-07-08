@@ -17,6 +17,7 @@ from app.schemas.conversation import (
     ChatResponse,
     ConversationCreate,
     ConversationPublic,
+    ConversationRename,
     MessagePublic,
 )
 from app.services.orchestrator.agent import run_turn, stream_turn
@@ -128,6 +129,47 @@ async def delete_conversation(
     await session.delete(conv)
     await session.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.patch(
+    "/conversations/{conversation_id}",
+    response_model=ConversationPublic,
+)
+async def rename_conversation(
+    conversation_id: uuid.UUID,
+    payload: ConversationRename,
+    user_id: CurrentUserId,
+    session: DbSession,
+) -> ConversationPublic:
+    """Rename a conversation.
+
+    Ownership is enforced by ``Conversation.user_id == user_id`` (the
+    same filter ``get``/``delete`` use), on top of the RLS policy set
+    upstream by ``DbSession`` — a cross-tenant rename is a 404, not a
+    403, so the existence of another user's conversation is not leaked.
+    The title is already stripped + capped at 100 chars by the schema.
+    """
+    res = await session.execute(
+        select(Conversation).where(
+            Conversation.id == conversation_id,
+            Conversation.user_id == user_id,
+        )
+    )
+    conv = res.scalar_one_or_none()
+    if conv is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found"
+        )
+    conv.title = payload.title
+    await session.commit()
+    await session.refresh(conv)
+    return ConversationPublic(
+        id=conv.id,
+        title=conv.title,
+        created_at=conv.created_at,
+        updated_at=conv.updated_at,
+        message_count=len(conv.messages or []),
+    )
 
 
 # -------- turn (FR-22..26) --------

@@ -57,17 +57,61 @@ RUN groupadd --gid 1000 athena \
 COPY backend/requirements.txt ./backend/requirements.txt
 RUN pip install -r backend/requirements.txt
 
+# Bake model caches to a NON-home path. (Set AFTER `pip install` so the
+# pip layer stays cached — these ENVs only need to be visible to the
+# pre-download RUNs below and to the runtime `api` stage.) The runtime
+# process runs as `athena` (HOME=/home/athena); defaulting HF_HOME /
+# tiktoken cache to ~/.cache would put them on the read-only rootfs
+# (read_only:true) and crash on first use with [Errno 30]. /opt/hf-cache
+# and /opt/tiktoken-cache are baked into the image (read-only at runtime)
+# and only ever READ at runtime (HF_HUB_OFFLINE / TRANSFORMERS_OFFLINE
+# are set in the `api` stage), so they never need to be writable. Neither
+# path is under a tmpfs mount, so the baked content is never shadowed.
+ENV HF_HOME=/opt/hf-cache \
+    TIKTOKEN_CACHE_DIR=/opt/tiktoken-cache
+
 # Pre-download the sentence-transformers model so the first request after a
 # cold start is fast. Failures are non-fatal so the image can still build
-# on a machine without network access (e.g. a hermetic CI).
+# on a machine without network access (e.g. a hermetic CI). HF_HOME (set
+# above) routes this download into /opt/hf-cache, which the runtime `athena`
+# user reads from the read-only rootfs.
 RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')" \
  || echo "WARN: embedding model pre-download failed; will be fetched on first use"
+
+# Pre-bake tiktoken's cl100k_base BPE encoding. app/services/text.py calls
+# tiktoken.get_encoding("cl100k_base") at module import (i.e. at app STARTUP,
+# not only at ingestion), so without this the read-only container would
+# need network on every cold start to fetch it. TIKTOKEN_CACHE_DIR (set
+# above) routes the download into /opt/tiktoken-cache. Best-effort, same
+# non-fatal fallback as the embedding model.
+RUN python -c "import tiktoken; tiktoken.get_encoding('cl100k_base')" \
+ || echo "WARN: tiktoken encoding pre-download failed; will be fetched on first use"
+
+# The pre-downloads above ran as root (api-base has no USER directive). The
+# runtime process is `athena` (uid 1000), reading these caches from the
+# read-only rootfs — chown so athena can read them. Guarded (2>/dev/null ||
+# true) so a best-effort download that left a dir absent doesn't fail the
+# build.
+RUN chown -R athena:athena /opt/hf-cache /opt/tiktoken-cache 2>/dev/null || true
 
 
 # ============================================================================
 # api — runtime image for the FastAPI app
 # ============================================================================
 FROM api-base AS api
+
+# Force HF/transformers into offline mode at runtime. The embedding model
+# is baked into /opt/hf-cache (read-only rootfs) by api-base; without
+# these flags huggingface_hub would still reach the hub to verify the
+# snapshot and try to write metadata into the (read-only) cache — i.e.
+# [Errno 30] even though the model is already present. Offline makes the
+# load a pure read from the baked cache: no network, no writes, fast and
+# read-only-safe. Inherited HF_HOME + TIKTOKEN_CACHE_DIR point at the
+# baked caches. (Hermetic builds where the pre-download failed will get
+# a clear "model not found in offline cache" error instead of errno 30 —
+# no model means no embeddings, which is inherent.)
+ENV HF_HUB_OFFLINE=1 \
+    TRANSFORMERS_OFFLINE=1
 
 # gosu lets the entrypoint drop privileges after fixing volume
 # ownership. We install it now (root) so the runtime stage is

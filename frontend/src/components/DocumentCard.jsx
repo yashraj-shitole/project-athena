@@ -1,6 +1,13 @@
 import React, { useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
-import ProgressBar from './ProgressBar.jsx';
+import { Trash2, FileText, MoreHorizontal, RefreshCw } from 'lucide-react';
+import Card from './ui/Card.jsx';
+import Button from './ui/Button.jsx';
+import StatusPill from './ui/StatusPill.jsx';
+import ProgressBar from './ui/ProgressBar.jsx';
+import Badge from './ui/Badge.jsx';
+import { Tooltip } from './ui/Tooltip.jsx';
+import { DropdownMenu, DropdownItem, DropdownSeparator } from './ui/DropdownMenu.jsx';
 import StageChecklist from './StageChecklist.jsx';
 import ErrorRetry from './ErrorRetry.jsx';
 import { useDocumentEvents } from '../hooks/useDocumentEvents.js';
@@ -105,49 +112,91 @@ export default function DocumentCard({ doc, onDelete, onOpen, showOpen = true })
   };
 
   return (
-    <div className="doc-card" data-status={status}>
-      <div className="doc-card-header">
-        <div className="doc-card-title">
-          <div className="doc-card-filename">{state.filename || doc.filename}</div>
-          <div className="doc-card-meta">
-            {(state.fileType || doc.file_type || '').toUpperCase()} ·{' '}
-            {formatBytes(state.sizeBytes ?? doc.size_bytes)}
-            {state.pageCount ? ` · ${state.pageCount} page${state.pageCount === 1 ? '' : 's'}` : ''}
-            {' · '}
-            {formatDate(state.createdAt || doc.created_at)}
+    <Card data-status={status} className="p-5">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0 flex-1 flex items-start gap-3">
+          <div className="hidden sm:flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-surface-2 text-ink-dim">
+            <FileText size={16} strokeWidth={1.5} />
+          </div>
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-2 min-w-0">
+              <p className="font-medium tracking-tight text-ink truncate">
+                {state.filename || doc.filename}
+              </p>
+            </div>
+            <p className="text-xs text-ink-dim mt-0.5 truncate">
+              {(state.fileType || doc.file_type || '').toUpperCase()} ·{' '}
+              {formatBytes(state.sizeBytes ?? doc.size_bytes)}
+              {state.pageCount ? ` · ${state.pageCount} page${state.pageCount === 1 ? '' : 's'}` : ''}
+              {' · '}
+              {formatDate(state.createdAt || doc.created_at)}
+            </p>
           </div>
         </div>
-        <div className="doc-card-actions">
+
+        <div className="flex items-center gap-2 shrink-0">
           {showOpen && (
-            <Link className="doc-card-link" to={`/documents/${doc.id}`}>
-              Open
+            <Link to={`/documents/${doc.id}`}>
+              <Button variant="ghost" size="sm">Open</Button>
             </Link>
           )}
           {onDelete && (
-            <button
-              className="danger doc-card-delete"
-              onClick={handleDelete}
-              disabled={deleting || isProcessing}
-              title={isProcessing ? 'Cannot delete while processing' : 'Delete document'}
-            >
-              {deleting ? 'Deleting…' : 'Delete'}
-            </button>
+            <Tooltip content={isProcessing ? 'Cannot delete while processing' : 'Delete document'}>
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                onClick={handleDelete}
+                disabled={deleting || isProcessing}
+                aria-label="Delete document"
+                className="text-ink-dim hover:text-[var(--danger)]"
+              >
+                <Trash2 size={15} strokeWidth={1.75} />
+              </Button>
+            </Tooltip>
           )}
+          <DropdownMenu
+            trigger={
+              <Button variant="ghost" size="icon-sm" aria-label="More actions">
+                <MoreHorizontal size={15} strokeWidth={1.75} />
+              </Button>
+            }
+          >
+            {showOpen && (
+              <DropdownItem asChild>
+                <Link to={`/documents/${doc.id}`} className="block w-full">
+                  Open
+                </Link>
+              </DropdownItem>
+            )}
+            {!isProcessing && !isIndexed && (
+              <DropdownItem onSelect={handleRetry} disabled={retrying}>
+                <RefreshCw size={14} strokeWidth={1.75} />
+                Retry processing
+              </DropdownItem>
+            )}
+            {onDelete && (
+              <>
+                <DropdownSeparator />
+                <DropdownItem danger onSelect={handleDelete} disabled={deleting || isProcessing}>
+                  <Trash2 size={14} strokeWidth={1.75} />
+                  Delete
+                </DropdownItem>
+              </>
+            )}
+          </DropdownMenu>
         </div>
       </div>
 
-      <div className="doc-card-status">
-        <span className={`status-pill status-${status}`}>{status}</span>
-        <span className="doc-card-status-line">{statusLine}</span>
+      <div className="mt-3 flex items-center gap-2 flex-wrap">
+        <StatusPill status={status} />
+        <span className="text-sm text-ink-dim">{statusLine}</span>
         {!connected && isProcessing && (
-          <span className="doc-card-conn" title="Live stream disconnected; reconnecting…">
-            (reconnecting)
-          </span>
+          <Badge tone="warn" size="sm">reconnecting</Badge>
         )}
       </div>
 
       {isProcessing && (
-        <div className="doc-card-progress">
+        <div className="mt-4 flex flex-col gap-3">
           <ProgressBar
             percent={state.overallPct}
             label={state.overallPct ? undefined : 'Starting…'}
@@ -163,36 +212,43 @@ export default function DocumentCard({ doc, onDelete, onOpen, showOpen = true })
       )}
 
       {isFailed && (
-        <ErrorRetry
-          error={state.errorMessage || doc.error_message}
-          onRetry={onDelete || retrying ? undefined : handleRetry}
-          retrying={retrying}
-        />
+        <div className="mt-4">
+          <ErrorRetry
+            error={state.errorMessage || doc.error_message}
+            onRetry={onDelete || retrying ? undefined : handleRetry}
+            retrying={retrying}
+          />
+        </div>
       )}
 
       {isIndexed && (
-        <div className="doc-success">
-          <div className="doc-success-headline">✓ Processing complete</div>
-          <dl className="doc-metadata">
-            <dt>Pages</dt>
-            <dd>{state.pageCount ?? '—'}</dd>
-            <dt>Chunks indexed</dt>
-            <dd>{state.chunkCount ?? doc.chunk_count ?? '—'}</dd>
-            <dt>Embedding model</dt>
-            <dd>{state.embeddingModel || doc.embedding_model || '—'}</dd>
-            <dt>Processing time</dt>
-            <dd>{formatDuration(state.processingTimeMs ?? doc.processing_time_ms)}</dd>
-            <dt>Indexed at</dt>
-            <dd>{formatDate(state.processedAt || doc.processed_at)}</dd>
+        <div className="mt-4 flex flex-col gap-3">
+          <div className="flex items-center gap-2 text-sm text-[var(--ok)]">
+            <span className="flex h-4 w-4 items-center justify-center rounded-full bg-[var(--ok-bg)]">
+              <span className="h-1.5 w-1.5 rounded-full bg-[var(--ok)]" />
+            </span>
+            Processing complete
+          </div>
+          <dl className="grid grid-cols-[max-content_1fr] gap-x-6 gap-y-1.5 text-sm">
+            <dt className="text-ink-dim">Pages</dt>
+            <dd className="text-ink tabular-nums">{state.pageCount ?? '—'}</dd>
+            <dt className="text-ink-dim">Chunks indexed</dt>
+            <dd className="text-ink tabular-nums">{state.chunkCount ?? doc.chunk_count ?? '—'}</dd>
+            <dt className="text-ink-dim">Embedding model</dt>
+            <dd className="text-ink">{state.embeddingModel || doc.embedding_model || '—'}</dd>
+            <dt className="text-ink-dim">Processing time</dt>
+            <dd className="text-ink">{formatDuration(state.processingTimeMs ?? doc.processing_time_ms)}</dd>
+            <dt className="text-ink-dim">Indexed at</dt>
+            <dd className="text-ink">{formatDate(state.processedAt || doc.processed_at)}</dd>
           </dl>
         </div>
       )}
 
       {error && !isFailed && (
-        <div className="doc-card-error" role="status">
+        <div className="mt-3 text-xs text-ink-dim italic" role="status">
           Live stream error: {error}
         </div>
       )}
-    </div>
+    </Card>
   );
 }

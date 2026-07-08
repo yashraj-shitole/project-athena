@@ -6,6 +6,7 @@ import DocumentDetail from './pages/DocumentDetail.jsx';
 import DocumentManager from './pages/DocumentManager.jsx';
 import Login from './pages/Login.jsx';
 import { useAuth } from './hooks/useAuth.js';
+import { Skeleton } from './components/ui/Skeleton.jsx';
 
 /**
  * Same-origin path validator. We accept only paths that start with `/`
@@ -25,16 +26,12 @@ function Protected({ children }) {
   const location = useLocation();
   if (!ready) {
     return (
-      <div
-        role="status"
-        aria-live="polite"
-        style={{
-          padding: 24,
-          color: 'var(--text-dim)',
-          fontFamily: 'system-ui, sans-serif',
-        }}
-      >
-        Loading…
+      <div className="flex h-screen w-screen items-center justify-center bg-background">
+        <div className="w-72 space-y-3">
+          <Skeleton className="h-5 w-32" />
+          <Skeleton className="h-3 w-48" />
+          <Skeleton className="h-3 w-40" />
+        </div>
       </div>
     );
   }

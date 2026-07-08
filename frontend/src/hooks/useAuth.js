@@ -60,6 +60,27 @@ if (typeof window !== 'undefined') {
   });
 }
 
+/**
+ * Decode the JWT `exp` (seconds since epoch) from an access token, or
+ * null if it isn't a parseable JWT. We read the payload only — no
+ * signature verification — because the server is the source of truth
+ * on validity; this just lets the client decide whether to proactively
+ * redeem the refresh token before /me would 401.
+ */
+function _tokenExp(token) {
+  if (!token || typeof token !== 'string') return null;
+  const segs = token.split('.');
+  if (segs.length < 2) return null;
+  try {
+    const b64 = segs[1].replace(/-/g, '+').replace(/_/g, '/');
+    const pad = '='.repeat((4 - (b64.length % 4)) % 4);
+    const payload = JSON.parse(atob(b64 + pad));
+    return typeof payload?.exp === 'number' ? payload.exp : null;
+  } catch {
+    return null;
+  }
+}
+
 let _bootstrapPromise = null;
 function ensureBootstrapped() {
   if (_state.bootstrapping) return _bootstrapPromise;
@@ -71,6 +92,25 @@ function ensureBootstrapped() {
   _state = { ..._state, bootstrapping: true };
   _bootstrapPromise = (async () => {
     try {
+      // Proactive refresh: if the access token has already expired,
+      // redeem the refresh token BEFORE calling /me. Otherwise every
+      // reload past the 30-min access TTL emits a visible 401 (the
+      // browser logs the first /me attempt regardless of how the JS
+      // handles the response) and costs an extra round-trip
+      // (401 -> refresh -> retry). We only refresh when truly expired
+      // so a still-valid token doesn't needlessly rotate the refresh-
+      // token chain. The reactive 401 path in apiClient remains as a
+      // fallback for clock-skew edge cases.
+      const exp = _tokenExp(_state.token);
+      if (exp !== null && exp <= Math.floor(Date.now() / 1000)) {
+        try {
+          const data = await authService.refresh();
+          if (data?.access_token) setState({ token: data.access_token });
+        } catch {
+          // Refresh token also expired/unavailable — fall through to
+          // /me, which will 401 and route through the normal logout.
+        }
+      }
       const me = await authService.me();
       setState({ user: me, ready: true, bootstrapping: false });
     } catch (e) {

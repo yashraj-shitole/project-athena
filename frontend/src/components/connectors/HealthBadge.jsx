@@ -6,29 +6,25 @@
  * slow (yellow), unknown (gray).
  */
 import React from 'react';
+import StatusPill from '../ui/StatusPill.jsx';
 
-const COLORS = {
-  online: { bg: '#10b981', fg: '#fff' },         // emerald-500
-  offline: { bg: '#6b7280', fg: '#fff' },        // gray-500
-  auth_failed: { bg: '#ef4444', fg: '#fff' },    // red-500
-  rate_limited: { bg: '#f97316', fg: '#fff' },   // orange-500
-  slow: { bg: '#eab308', fg: '#000' },           // yellow-500
-  unknown: { bg: '#9ca3af', fg: '#fff' },        // gray-400
+const LATENCY_LABEL = {
+  online: 'online',
+  offline: 'offline',
+  auth_failed: 'auth failed',
+  rate_limited: 'rate limited',
+  slow: 'slow',
+  unknown: 'unknown',
 };
 
 export default function HealthBadge({ status, latencyMs }) {
   const s = (status || 'unknown').toLowerCase();
-  const palette = COLORS[s] || COLORS.unknown;
   const label = s === 'online' && latencyMs
     ? `online · ${latencyMs}ms`
-    : s;
+    : LATENCY_LABEL[s] || s;
   return (
-    <span
-      className="status-pill"
-      style={{ background: palette.bg, color: palette.fg }}
-      title={latencyMs ? `Last probe: ${latencyMs}ms` : ''}
-    >
+    <StatusPill status={s} title={latencyMs ? `Last probe: ${latencyMs}ms` : ''}>
       {label}
-    </span>
+    </StatusPill>
   );
 }

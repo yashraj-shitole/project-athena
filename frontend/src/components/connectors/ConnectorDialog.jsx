@@ -14,7 +14,13 @@
  *   - A "Reveal preview" toggle shows the preview verbatim.
  */
 import React, { useEffect, useMemo, useState } from 'react';
+import { Eye, EyeOff, AlertCircle, Plug, Loader2, ChevronRight } from 'lucide-react';
 import TestPanel from './TestPanel.jsx';
+import Dialog from '../ui/Dialog.jsx';
+import Input from '../ui/Input.jsx';
+import Select from '../ui/Select.jsx';
+import Textarea from '../ui/Textarea.jsx';
+import Button from '../ui/Button.jsx';
 
 const ALL_PROVIDERS = [
   { value: 'openai_compat', label: 'OpenAI-compatible (OpenAI, Groq, Mistral, …)' },
@@ -123,6 +129,7 @@ export default function ConnectorDialog({
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState(null);
   const [showTest, setShowTest] = useState(false);
+  const [showAdvanced, setShowAdvanced] = useState(false);
 
   // If we don't have an initial row, seed from the canned template.
   useEffect(() => {
@@ -211,14 +218,25 @@ export default function ConnectorDialog({
     requestTemplate, responsePaths,
   ]);
 
-  if (!open) return null;
-
   const submit = async (e) => {
     e?.preventDefault?.();
     setSubmitting(true);
     setError(null);
     try {
-      await onSubmit(payload);
+      // PATCH /api/connectors/{id} uses ModelConnectorUpdate, which
+      // deliberately omits `provider` (immutable after create) and
+      // `is_admin` (create-only, admin-gated). Stripping here keeps
+      // the create and edit forms in sync without forking the
+      // payload builder. The custom-request-template fields below
+      // `provider` are only meaningful at create time too, so they
+      // ride along on the same condition.
+      const body = isEdit
+        ? (() => {
+            const { provider: _p, is_admin: _a, ...rest } = payload;
+            return rest;
+          })()
+        : payload;
+      await onSubmit(body);
       onClose();
     } catch (err) {
       setError(err?.message || String(err));
@@ -228,304 +246,311 @@ export default function ConnectorDialog({
   };
 
   return (
-    <div className="modal-backdrop" onClick={onClose}>
-      <div
-        className="modal modal-large"
-        onClick={(e) => e.stopPropagation()}
-        role="dialog"
-        aria-modal="true"
-        aria-label={isEdit ? 'Edit connector' : 'Add connector'}
-      >
-        <div className="modal-header">
-          <h2>{isEdit ? 'Edit connector' : 'Add connector'}</h2>
-          <button type="button" className="modal-close" onClick={onClose} aria-label="Close">
-            ×
-          </button>
+    <Dialog
+      open={open}
+      onOpenChange={(o) => { if (!o) onClose(); }}
+      size="xl"
+      title={isEdit ? 'Edit connector' : 'Add connector'}
+      description={
+        isEdit
+          ? 'Update the connection details and capabilities.'
+          : 'Register an AI provider so Athena can route requests to it.'
+      }
+      footer={
+        <>
+          <Button
+            variant="ghost"
+            onClick={() => setShowTest((v) => !v)}
+            disabled={!baseUrl.trim() || !provider}
+          >
+            <Plug size={14} strokeWidth={1.75} />
+            {showTest ? 'Hide test' : 'Test before saving'}
+          </Button>
+          <div className="flex items-center gap-2 ml-auto">
+            <Button variant="ghost" onClick={onClose} disabled={submitting}>
+              Cancel
+            </Button>
+            <Button
+              variant="primary"
+              onClick={submit}
+              disabled={submitting || !name.trim() || !baseUrl.trim() || !defaultModel.trim()}
+            >
+              {submitting ? (
+                <>
+                  <Loader2 size={14} strokeWidth={1.75} className="animate-spin" />
+                  Saving…
+                </>
+              ) : isEdit ? 'Save changes' : 'Create connector'}
+            </Button>
+          </div>
+        </>
+      }
+    >
+      <form onSubmit={submit} className="flex flex-col gap-4">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <Field label="Provider" hint={isEdit ? 'cannot change' : undefined}>
+            <Select value={provider} onChange={(e) => setProvider(e.target.value)} disabled={isEdit}>
+              {ALL_PROVIDERS.map((p) => (
+                <option key={p.value} value={p.value}>{p.label}</option>
+              ))}
+            </Select>
+          </Field>
+          <Field label="Display name">
+            <Input
+              type="text"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              required
+              placeholder="e.g. My OpenAI account"
+            />
+          </Field>
         </div>
 
-        <form onSubmit={submit} className="connector-form">
-          <div className="form-row">
-            <label>
-              <span>Provider</span>
-              <select
-                value={provider}
-                onChange={(e) => setProvider(e.target.value)}
-                disabled={isEdit}
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <Field label="Base URL">
+            <Input
+              type="url"
+              value={baseUrl}
+              onChange={(e) => setBaseUrl(e.target.value)}
+              required
+              spellCheck={false}
+            />
+          </Field>
+          <Field label="Default model">
+            <Input
+              type="text"
+              value={defaultModel}
+              onChange={(e) => setDefaultModel(e.target.value)}
+              required
+              spellCheck={false}
+              placeholder="e.g. gpt-4o-mini"
+            />
+          </Field>
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <Field label="Auth type">
+            <Select value={authType} onChange={(e) => setAuthType(e.target.value)}>
+              {AUTH_TYPES.map((a) => (
+                <option key={a.value} value={a.value}>{a.label}</option>
+              ))}
+            </Select>
+          </Field>
+          {authType === 'header' && (
+            <Field label="Header name">
+              <Input
+                type="text"
+                value={authHeaderName}
+                onChange={(e) => setAuthHeaderName(e.target.value)}
+                placeholder="x-api-key"
+              />
+            </Field>
+          )}
+        </div>
+
+        <Field
+          label="API key"
+          hint={isEdit ? 'leave blank to keep the existing key' : undefined}
+        >
+          <div className="relative">
+            <Input
+              type={revealKey ? 'text' : 'password'}
+              value={apiKey}
+              onChange={(e) => setApiKey(e.target.value)}
+              placeholder={isEdit ? '(unchanged)' : 'sk-...'}
+              autoComplete="off"
+              spellCheck={false}
+              className="pr-20"
+            />
+            <div className="absolute right-1 top-1/2 -translate-y-1/2 flex items-center gap-1">
+              {apiKeyPreview && !apiKey && (
+                <code className="text-[10px] text-ink-faint font-mono mr-1">{apiKeyPreview}</code>
+              )}
+              <button
+                type="button"
+                onClick={() => setRevealKey((v) => !v)}
+                aria-label={revealKey ? 'Hide key' : 'Reveal key'}
+                className="inline-flex h-7 w-7 items-center justify-center rounded-md text-ink-faint hover:text-ink hover:bg-surface-2 transition-colors"
               >
-                {ALL_PROVIDERS.map((p) => (
-                  <option key={p.value} value={p.value}>{p.label}</option>
-                ))}
-              </select>
-            </label>
-            <label>
-              <span>Display name</span>
-              <input
-                type="text"
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                required
-                placeholder="e.g. My OpenAI account"
-              />
-            </label>
+                {revealKey ? <EyeOff size={14} strokeWidth={1.75} /> : <Eye size={14} strokeWidth={1.75} />}
+              </button>
+            </div>
           </div>
+        </Field>
 
-          <div className="form-row">
-            <label>
-              <span>Base URL</span>
-              <input
-                type="url"
-                value={baseUrl}
-                onChange={(e) => setBaseUrl(e.target.value)}
-                required
-                spellCheck={false}
-              />
-            </label>
-            <label>
-              <span>Default model</span>
-              <input
-                type="text"
-                value={defaultModel}
-                onChange={(e) => setDefaultModel(e.target.value)}
-                required
-                spellCheck={false}
-                placeholder="e.g. gpt-4o-mini"
-              />
-            </label>
-          </div>
-
-          <div className="form-row">
-            <label>
-              <span>Auth type</span>
-              <select value={authType} onChange={(e) => setAuthType(e.target.value)}>
-                {AUTH_TYPES.map((a) => (
-                  <option key={a.value} value={a.value}>{a.label}</option>
-                ))}
-              </select>
-            </label>
-            {authType === 'header' && (
-              <label>
-                <span>Header name</span>
-                <input
+        {(provider === 'openai_compat' || provider === 'azure_openai') && (
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            {provider === 'openai_compat' && (
+              <>
+                <Field label="Organization ID" hint="optional">
+                  <Input
+                    type="text"
+                    value={organizationId}
+                    onChange={(e) => setOrganizationId(e.target.value)}
+                  />
+                </Field>
+                <Field label="Project ID" hint="optional">
+                  <Input
+                    type="text"
+                    value={projectId}
+                    onChange={(e) => setProjectId(e.target.value)}
+                  />
+                </Field>
+              </>
+            )}
+            {provider === 'azure_openai' && (
+              <Field label="API version">
+                <Input
                   type="text"
-                  value={authHeaderName}
-                  onChange={(e) => setAuthHeaderName(e.target.value)}
-                  placeholder="x-api-key"
+                  value={apiVersion}
+                  onChange={(e) => setApiVersion(e.target.value)}
+                  placeholder="2024-02-01"
                 />
-              </label>
+              </Field>
             )}
           </div>
+        )}
 
-          <div className="form-row">
-            <label className="form-key-field">
-              <span>API key</span>
-              <input
-                type={revealKey ? 'text' : 'password'}
-                value={apiKey}
-                onChange={(e) => setApiKey(e.target.value)}
-                placeholder={
-                  isEdit
-                    ? '(unchanged — leave blank to keep the existing key)'
-                    : 'sk-...'
-                }
-                autoComplete="off"
-                spellCheck={false}
+        <Field label="Exposed models" hint="one per line">
+          <Textarea
+            value={models}
+            onChange={(e) => setModels(e.target.value)}
+            rows={3}
+            placeholder="gpt-4o-mini&#10;gpt-4o"
+          />
+        </Field>
+
+        {provider === 'custom' && (
+          <div className="grid grid-cols-1 gap-4">
+            <Field label="Request template" hint="JSON">
+              <Textarea
+                value={requestTemplate}
+                onChange={(e) => setRequestTemplate(e.target.value)}
+                rows={10}
+                className="font-mono text-xs"
               />
-              <div className="form-key-hint">
-                {apiKeyPreview && !apiKey && (
-                  <span>Current: <code>{apiKeyPreview}</code></span>
-                )}
-                <button
-                  type="button"
-                  className="form-link"
-                  onClick={() => setRevealKey((v) => !v)}
-                >
-                  {revealKey ? 'Hide' : 'Reveal'}
-                </button>
-              </div>
-            </label>
+            </Field>
+            <Field label="Response paths" hint="JSON">
+              <Textarea
+                value={responsePaths}
+                onChange={(e) => setResponsePaths(e.target.value)}
+                rows={6}
+                className="font-mono text-xs"
+              />
+            </Field>
           </div>
+        )}
 
-          {(provider === 'openai_compat' || provider === 'azure_openai') && (
-            <div className="form-row">
-              {provider === 'openai_compat' && (
-                <>
-                  <label>
-                    <span>Organization ID (optional)</span>
-                    <input
-                      type="text"
-                      value={organizationId}
-                      onChange={(e) => setOrganizationId(e.target.value)}
-                    />
-                  </label>
-                  <label>
-                    <span>Project ID (optional)</span>
-                    <input
-                      type="text"
-                      value={projectId}
-                      onChange={(e) => setProjectId(e.target.value)}
-                    />
-                  </label>
-                </>
-              )}
-              {provider === 'azure_openai' && (
-                <label>
-                  <span>API version</span>
-                  <input
-                    type="text"
-                    value={apiVersion}
-                    onChange={(e) => setApiVersion(e.target.value)}
-                    placeholder="2024-02-01"
-                  />
-                </label>
-              )}
-            </div>
-          )}
-
-          <div className="form-row">
-            <label>
-              <span>Exposed models (one per line)</span>
-              <textarea
-                value={models}
-                onChange={(e) => setModels(e.target.value)}
+        <button
+          type="button"
+          onClick={() => setShowAdvanced((v) => !v)}
+          className="flex items-center gap-1.5 self-start text-xs font-medium text-ink-dim hover:text-ink transition-colors"
+        >
+          <ChevronRight
+            size={12}
+            strokeWidth={1.75}
+            className={`transition-transform ${showAdvanced ? 'rotate-90' : ''}`}
+          />
+          Advanced
+        </button>
+        {showAdvanced && (
+          <div className="rounded-lg border border-hairline bg-surface-2/30 p-4 flex flex-col gap-4">
+            <Field label="Custom headers" hint="JSON">
+              <Textarea
+                value={customHeadersText}
+                onChange={(e) => setCustomHeadersText(e.target.value)}
                 rows={3}
-                placeholder="gpt-4o-mini&#10;gpt-4o"
+                className="font-mono text-xs"
               />
-            </label>
-          </div>
-
-          {provider === 'custom' && (
-            <>
-              <div className="form-row">
-                <label>
-                  <span>Request template (JSON)</span>
-                  <textarea
-                    value={requestTemplate}
-                    onChange={(e) => setRequestTemplate(e.target.value)}
-                    rows={10}
-                    className="form-code"
-                  />
-                </label>
-              </div>
-              <div className="form-row">
-                <label>
-                  <span>Response paths (JSON)</span>
-                  <textarea
-                    value={responsePaths}
-                    onChange={(e) => setResponsePaths(e.target.value)}
-                    rows={6}
-                    className="form-code"
-                  />
-                </label>
-              </div>
-            </>
-          )}
-
-          <details className="form-advanced">
-            <summary>Advanced</summary>
-            <div className="form-row">
-              <label>
-                <span>Custom headers (JSON)</span>
-                <textarea
-                  value={customHeadersText}
-                  onChange={(e) => setCustomHeadersText(e.target.value)}
-                  rows={3}
-                  className="form-code"
-                />
-              </label>
-            </div>
-            <div className="form-row">
-              <label>
-                <span>Capabilities (JSON)</span>
-                <textarea
+            </Field>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <Field label="Capabilities" hint="JSON">
+                <Textarea
                   value={capabilitiesText}
                   onChange={(e) => setCapabilitiesText(e.target.value)}
                   rows={3}
-                  className="form-code"
+                  className="font-mono text-xs"
                 />
-              </label>
-              <label>
-                <span>Settings (JSON)</span>
-                <textarea
+              </Field>
+              <Field label="Settings" hint="JSON">
+                <Textarea
                   value={settingsText}
                   onChange={(e) => setSettingsText(e.target.value)}
                   rows={3}
-                  className="form-code"
+                  className="font-mono text-xs"
                 />
-              </label>
+              </Field>
             </div>
-            <div className="form-row">
-              <label>
-                <span>Group (optional)</span>
-                <input
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <Field label="Group" hint="optional">
+                <Input
                   type="text"
                   value={groupName}
                   onChange={(e) => setGroupName(e.target.value)}
                 />
-              </label>
-              <label>
-                <span>Tags (comma separated)</span>
-                <input
+              </Field>
+              <Field label="Tags" hint="comma separated">
+                <Input
                   type="text"
                   value={tagsText}
                   onChange={(e) => setTagsText(e.target.value)}
                 />
-              </label>
+              </Field>
             </div>
-            <div className="form-row form-row-checks">
-              <label className="form-check">
-                <input
-                  type="checkbox"
-                  checked={isEnabled}
-                  onChange={(e) => setIsEnabled(e.target.checked)}
-                />
-                <span>Enabled</span>
-              </label>
-              <label className="form-check">
-                <input
-                  type="checkbox"
-                  checked={isFavorite}
-                  onChange={(e) => setIsFavorite(e.target.checked)}
-                />
-                <span>Favorite</span>
-              </label>
-              <label className="form-check">
-                <input
-                  type="checkbox"
-                  checked={isAdmin}
-                  onChange={(e) => setIsAdmin(e.target.checked)}
-                />
-                <span>Shared (admin — visible to all users)</span>
-              </label>
-            </div>
-          </details>
-
-          {error && <div className="test-panel-error">⚠ {error}</div>}
-
-          <div className="modal-footer">
-            <button
-              type="button"
-              onClick={() => setShowTest((v) => !v)}
-              disabled={!baseUrl.trim() || !provider}
-            >
-              {showTest ? 'Hide test' : 'Test before saving'}
-            </button>
-            <div className="modal-footer-right">
-              <button type="button" onClick={onClose} disabled={submitting}>
-                Cancel
-              </button>
-              <button type="submit" className="primary" disabled={submitting || !name.trim() || !baseUrl.trim() || !defaultModel.trim()}>
-                {submitting ? 'Saving…' : isEdit ? 'Save changes' : 'Create connector'}
-              </button>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-1">
+              <Checkbox label="Enabled" checked={isEnabled} onChange={setIsEnabled} />
+              <Checkbox label="Favorite" checked={isFavorite} onChange={setIsFavorite} />
+              <Checkbox
+                label="Shared (admin — visible to all users)"
+                checked={isAdmin}
+                onChange={setIsAdmin}
+              />
             </div>
           </div>
+        )}
 
-          {showTest && (
-            <div className="modal-test-section">
-              <TestPanel payload={payload} />
-            </div>
-          )}
-        </form>
-      </div>
-    </div>
+        {error && (
+          <div
+            role="alert"
+            className="rounded-lg border border-[var(--danger)]/30 bg-[var(--danger-bg)]/60 px-3 py-2 text-sm text-[var(--danger)] flex items-start gap-2"
+          >
+            <AlertCircle size={14} strokeWidth={1.75} className="mt-0.5 shrink-0" />
+            <span className="flex-1 break-words">{error}</span>
+          </div>
+        )}
+
+        {showTest && (
+          <div className="rounded-lg border border-dashed border-hairline p-4 bg-surface-2/30">
+            <TestPanel payload={payload} />
+          </div>
+        )}
+      </form>
+    </Dialog>
+  );
+}
+
+function Field({ label, hint, children }) {
+  return (
+    <label className="flex flex-col gap-1.5">
+      <span className="text-[10px] font-medium uppercase tracking-wider text-ink-dim">
+        {label}
+        {hint && <span className="ml-1 text-ink-faint normal-case tracking-normal">· {hint}</span>}
+      </span>
+      {children}
+    </label>
+  );
+}
+
+function Checkbox({ label, checked, onChange }) {
+  return (
+    <label className="flex items-center gap-2 text-sm text-ink cursor-pointer select-none">
+      <input
+        type="checkbox"
+        checked={checked}
+        onChange={(e) => onChange(e.target.checked)}
+        className="h-4 w-4 rounded border border-hairline text-[var(--accent)] focus:ring-hairline-strong"
+      />
+      {label}
+    </label>
   );
 }

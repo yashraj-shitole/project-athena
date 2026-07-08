@@ -259,7 +259,13 @@ CREATE TABLE IF NOT EXISTS model_connectors (
     is_default             BOOLEAN NOT NULL DEFAULT FALSE,
     is_admin               BOOLEAN NOT NULL DEFAULT FALSE,
     group_name             TEXT,
-    tags                   TEXT[] NOT NULL DEFAULT '{}'::text[],
+    -- JSONB (not ARRAY) so the Python ORM can use a single column
+    -- type that round-trips on both Postgres and the SQLite
+    -- in-memory backend used by the unit-test suite. See
+    -- ``backend/app/models/connector.py::ModelConnector.tags``.
+    -- Any query-side advantage of ARRAY can be reproduced with
+    -- `jsonb_array_elements_text(tags)` if we ever need it.
+    tags                   JSONB NOT NULL DEFAULT '[]'::jsonb,
     is_favorite            BOOLEAN NOT NULL DEFAULT FALSE,
     last_health            TEXT,                               -- online | offline | auth_failed | rate_limited | slow | unknown
     last_health_at         TIMESTAMPTZ,

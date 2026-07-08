@@ -25,10 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.core.logging import get_logger
-from app.models.connector import (
-    ModelConnector,
-    PROVIDER_OLLAMA,
-)
+from app.models.connector import ModelConnector
 from app.services.providers import registry
 from app.services.providers.base import ProviderAdapter, ProviderError
 
@@ -79,15 +76,13 @@ def _build_adapter(row: ModelConnector) -> ProviderAdapter:
         "default_model": row.default_model,
         "models": list(row.models or []),
     }
-    if row.provider == PROVIDER_OLLAMA:
-        # The Ollama adapter accepts the same kwargs (Phase D will
-        # land the dedicated class — until then, fall through to the
-        # openai-compat path so the chat engine still works for the
-        # built-in Ollama when the user has it registered).
-        from app.services.providers.openai_compat import OpenAICompatibleProvider
-
-        return OpenAICompatibleProvider(**common)
-
+    # The registry already maps every provider name to its adapter
+    # (incl. "ollama" -> OllamaProvider). The earlier OLLAMA special
+    # case here force-routed Ollama connectors to OpenAICompatibleProvider,
+    # which POSTs {base_url}/chat/completions — Ollama's OpenAI-compat
+    # shim lives at /v1/chat/completions, so against the default base URL
+    # (server root, no /v1) that 404'd with "404 page not found". Falling
+    # through to `cls` routes Ollama to OllamaProvider's native /api/chat.
     return cls(**common)
 
 
@@ -205,12 +200,16 @@ class ModelRouter:
         is the path that keeps Phase 1 behaviour intact.
         """
         from app.core.config import get_settings
-        from app.services.providers.openai_compat import OpenAICompatibleProvider
+        from app.services.providers.ollama import OllamaProvider
 
         # Settings is read at fallback time so test config (which
         # mutates env vars) is picked up.
         s = get_settings()
-        return OpenAICompatibleProvider(
+        # Use the native Ollama adapter (POST /api/chat), not the
+        # OpenAI-compat shim: OLLAMA_BASE_URL defaults to the server
+        # root (http://localhost:11434, no /v1), so the compat path's
+        # {base_url}/chat/completions 404s. /api/chat works at the root.
+        return OllamaProvider(
             base_url=s.OLLAMA_BASE_URL,
             api_key=None,
             auth_type="none",

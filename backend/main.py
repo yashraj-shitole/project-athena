@@ -102,6 +102,11 @@ app.include_router(chat.router, prefix="/api")
 app.include_router(tools.router, prefix="/api")
 app.include_router(connectors.router)  # /api/connectors/*
 app.include_router(health.router)  # /health, /model (no /api prefix — matches nginx)
+# Re-mount under /api so /api/model, /api/health, /api/metrics work for
+# clients that prefix every API call with /api (the default for the
+# frontend's apiClient). Routes are path-relative (e.g. @router.get("/model"))
+# so they pick up the prefix transparently.
+app.include_router(health.router, prefix="/api")
 
 
 @app.get("/")

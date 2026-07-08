@@ -49,6 +49,7 @@ from app.services.providers.base import (
     LLMResponse,
     ProviderAdapter,
     ProviderError,
+    _summarize_request,
 )
 
 log = get_logger(__name__)
@@ -258,6 +259,29 @@ class OpenAICompatibleProvider(ProviderAdapter):
             payload["tools"] = list(req.tools)
         payload.update(_options_to_payload(req.options, stream=False))
 
+        # Debug log: same shape as the Ollama adapter. See
+        # ``app.services.providers.ollama.OllamaProvider.chat`` for the
+        # rationale. Auth header is redacted before logging.
+        try:
+            log.info(
+                "llm.debug.request",
+                adapter=self.name,
+                stream=False,
+                **_summarize_request(
+                    provider=self.name,
+                    base_url=self.base_url,
+                    endpoint="/chat/completions",
+                    model=model,
+                    headers=self._headers(),
+                    messages=req.messages,
+                    tools=req.tools,
+                    options=req.options,
+                    extra={"payload_keys": sorted(payload.keys())},
+                ),
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
         try:
             r = await self._client.post(
                 "/chat/completions",
@@ -319,6 +343,27 @@ class OpenAICompatibleProvider(ProviderAdapter):
         if req.tools:
             payload["tools"] = list(req.tools)
         payload.update(_options_to_payload(req.options, stream=True))
+
+        # See ``chat()`` for the rationale.
+        try:
+            log.info(
+                "llm.debug.request",
+                adapter=self.name,
+                stream=True,
+                **_summarize_request(
+                    provider=self.name,
+                    base_url=self.base_url,
+                    endpoint="/chat/completions",
+                    model=model,
+                    headers=self._headers(),
+                    messages=req.messages,
+                    tools=req.tools,
+                    options=req.options,
+                    extra={"payload_keys": sorted(payload.keys())},
+                ),
+            )
+        except Exception:  # noqa: BLE001
+            pass
 
         try:
             async with self._client.stream(

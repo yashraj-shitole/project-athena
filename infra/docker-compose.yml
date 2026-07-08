@@ -161,8 +161,16 @@ services:
     #   immutable; only the storage volume and the OS-managed
     #   tmpfs (below) are writable. A compromised API process
     #   cannot write to /app, /etc, or anywhere else.
-    # * ``tmpfs`` for /tmp, /var/run, /root/.cache (the
-    #   sentence-transformers model cache).
+    # * ``tmpfs`` for /tmp, /var/run, and the runtime user's cache
+    #   home (/home/athena/.cache — the process runs as `athena`,
+    #   not root, so /root/.cache would be unreachable). The
+    #   heavy caches (sentence-transformers model, tiktoken BPE
+    #   encoding) are NOT here: they are baked into the image at
+    #   /opt/hf-cache and /opt/tiktoken-cache (see Dockerfile) and
+    #   read read-only at runtime with HF_HUB_OFFLINE=1. This
+    #   /home/athena/.cache tmpfs is defense-in-depth for any
+    #   future library that writes to ~/.cache; nothing in the
+    #   current indexing path strictly requires it.
     # * ``security_opt`` drops the container's Linux
     #   capabilities; ``no-new-privileges`` blocks setuid
     #   binaries from re-acquiring capabilities.
@@ -172,7 +180,7 @@ services:
     tmpfs:
       - /tmp:size=128M,mode=1777
       - /var/run:size=16M,mode=0755
-      - /root/.cache:size=512M,mode=0755
+      - /home/athena/.cache:size=512M,uid=1000,gid=1000,mode=0755
       # M-25 (revised) — allow `pip install --user` for ad-hoc
       # debugging tools (e.g. ``debugpy`` to attach a remote
       # debugger). The user's site-packages land in

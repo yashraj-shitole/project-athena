@@ -689,6 +689,7 @@ async def refresh_models(
 
     adapter = _build_adapter_from_payload(
         TestRequest(
+            provider=row.provider,
             base_url=row.base_url,
             api_key=None,  # the adapter doesn't need it for /models
             auth_type=row.auth_type,

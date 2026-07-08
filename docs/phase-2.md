@@ -44,7 +44,7 @@ A second-stage reranker (cross-encoder, e.g. `cross-encoder/ms-marco-MiniLM-L-6-
 
 ## 7. Persistent conversation titles
 
-Today the conversation title is set to the first user message (truncated to 120 chars). Phase 2 uses the LLM to generate a 3-5 word title after the first turn.
+Today the conversation title is set to the first user message (truncated to 100 chars). Phase 2 uses the LLM to generate a 3-5 word title after the first turn.
 
 ## 8. Multi-modal document support
 

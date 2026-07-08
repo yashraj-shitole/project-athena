@@ -100,7 +100,7 @@ Indexes:
 |---|---|---|
 | `id` | UUID PK | |
 | `user_id` | UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE | |
-| `title` | TEXT | first user message (truncated to 120) |
+| `title` | TEXT | first user message (truncated to 100) |
 | `created_at` | TIMESTAMPTZ | |
 | `updated_at` | TIMESTAMPTZ | bumped on every new message |
 

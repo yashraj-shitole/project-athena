@@ -116,6 +116,50 @@ def test_conversation_create_rejects_id():
         )
 
 
+def test_conversation_rename_rejects_user_id():
+    """A rename must not be able to re-assign the principal."""
+    from app.schemas.conversation import ConversationRename
+
+    with pytest.raises(ValidationError):
+        ConversationRename(title="hi", user_id=str(uuid.uuid4()))
+
+
+def test_conversation_rename_rejects_id():
+    """A rename payload cannot smuggle an ``id`` to retarget the write
+    onto another conversation (the path param is authoritative)."""
+    from app.schemas.conversation import ConversationRename
+
+    with pytest.raises(ValidationError):
+        ConversationRename(title="hi", id=str(uuid.uuid4()))
+
+
+def test_conversation_rename_rejects_blank_after_strip():
+    """A rename to all-whitespace must 422, not blank the title."""
+    from app.schemas.conversation import ConversationRename
+
+    with pytest.raises(ValidationError):
+        ConversationRename(title="    ")
+
+
+def test_conversation_rename_rejects_over_100_chars():
+    """The rename title is capped at 100 chars to match the auto-name
+    from the user's first query."""
+    from app.schemas.conversation import ConversationRename
+
+    with pytest.raises(ValidationError):
+        ConversationRename(title="x" * 101)
+
+
+def test_conversation_rename_strips_and_accepts_valid():
+    """A valid rename strips surrounding whitespace and is accepted."""
+    from app.schemas.conversation import ConversationRename
+
+    m = ConversationRename(title="  My plan  ")
+    assert m.title == "My plan"
+    # 100 chars (after strip) is the boundary — accepted.
+    ConversationRename(title="y" * 100)
+
+
 def test_tool_upsert_rejects_is_builtin():
     """A non-admin caller must not be able to set ``is_builtin=True``
     on a new tool — that field is admin-only.

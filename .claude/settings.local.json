@@ -14,7 +14,9 @@
       "PowerShell(python C:\\\\Users\\\\yashr\\\\AppData\\\\Local\\\\Temp\\\\get-pip.py 2>&1 | Select-Object -Last 20)",
       "PowerShell(& .venv\\\\Scripts\\\\Activate.ps1; .venv\\\\Scripts\\\\python.exe C:\\\\Users\\\\yashr\\\\AppData\\\\Local\\\\Temp\\\\get-pip.py 2>&1 | Select-Object -Last 5)",
       "PowerShell(.venv\\\\Scripts\\\\pip.exe --version)",
-      "PowerShell(.venv\\\\Scripts\\\\pip.exe install --quiet 'passlib[bcrypt]' 2>&1 | Select-Object -Last 30)"
+      "PowerShell(.venv\\\\Scripts\\\\pip.exe install --quiet 'passlib[bcrypt]' 2>&1 | Select-Object -Last 30)",
+      "Bash(docker compose *)",
+      "Bash(docker exec *)"
     ]
   }
 }

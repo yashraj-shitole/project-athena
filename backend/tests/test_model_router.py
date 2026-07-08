@@ -26,6 +26,7 @@ if str(ROOT) not in sys.path:
 from app.services.providers.router import ModelRouter
 from app.models.connector import (
     AUTH_BEARER,
+    PROVIDER_OLLAMA,
     PROVIDER_OPENAI_COMPAT,
 )
 
@@ -252,8 +253,8 @@ async def test_ollama_fallback_when_no_connector_configured():
     usage row."""
 
     # Plan: user-default None, system-default None. Router then calls
-    # `_ollama_fallback()` which builds an OpenAICompatibleProvider
-    # from settings.
+    # `_ollama_fallback()` which builds an OllamaProvider (native
+    # /api/chat) from settings.
     session = _StubSession(plan=[None, None])
     router = ModelRouter()
 
@@ -264,7 +265,7 @@ async def test_ollama_fallback_when_no_connector_configured():
 
     assert conn_id is None
     assert model  # non-empty (settings.OLLAMA_MODEL)
-    assert adapter.name == PROVIDER_OPENAI_COMPAT
+    assert adapter.name == PROVIDER_OLLAMA
 
 
 # --- Visibility + state filters -----------------------------------------

@@ -1,8 +1,17 @@
 import React, { useEffect, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
-import { useAuth } from '../hooks/useAuth.js';
+import { motion } from 'framer-motion';
+import { ArrowLeft, FileText, AlertCircle, ChevronRight } from 'lucide-react';
 import docService from '../services/docService.js';
 import DocumentCard from '../components/DocumentCard.jsx';
+import AppShell from '../components/ui/AppShell.jsx';
+import Topbar from '../components/ui/Topbar.jsx';
+import Button from '../components/ui/Button.jsx';
+import Card from '../components/ui/Card.jsx';
+import Dialog from '../components/ui/Dialog.jsx';
+import { Skeleton } from '../components/ui/Skeleton.jsx';
+import { useToast } from '../components/ui/Toaster.jsx';
+import { fadeUp } from '../components/ui/Motion.jsx';
 
 /**
  * /documents/:id — the document detail page. Renders the same
@@ -12,12 +21,12 @@ import DocumentCard from '../components/DocumentCard.jsx';
  */
 export default function DocumentDetail() {
   const { id } = useParams();
-  const { user, logout } = useAuth();
   const nav = useNavigate();
   const [doc, setDoc] = useState(null);
   const [chunks, setChunks] = useState(null);
   const [err, setErr] = useState(null);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const toast = useToast();
 
   useEffect(() => {
     let cancelled = false;
@@ -45,111 +54,145 @@ export default function DocumentDetail() {
   const handleDelete = async () => {
     try {
       await docService.remove(id);
+      toast.show('Document deleted.', { tone: 'success' });
       nav('/');
     } catch (e) {
       setErr(e.message || 'Delete failed');
       setConfirmingDelete(false);
+      toast.show(e.message || 'Delete failed', { tone: 'error' });
     }
   };
 
   return (
-    <div className="app-shell">
-      <aside className="sidebar">
-        <h3 style={{ marginTop: 0 }}>Athena</h3>
-        <p style={{ color: 'var(--text-dim)', fontSize: 12 }}>{user?.email}</p>
-        <hr style={{ borderColor: 'var(--border)' }} />
-        <ul style={{ listStyle: 'none', padding: 0 }}>
-          <li><Link to="/">📄 Documents</Link></li>
-          <li><Link to="/chat">💬 Chat</Link></li>
-        </ul>
-        <hr style={{ borderColor: 'var(--border)' }} />
-        <button
-          className="secondary"
-          onClick={() => { logout(); nav('/login'); }}
+    <AppShell>
+      <Topbar>
+        <div className="flex items-center gap-2 text-sm">
+          <Link to="/" className="text-ink-dim hover:text-ink transition-colors">
+            Documents
+          </Link>
+          <ChevronRight size={14} strokeWidth={1.75} className="text-ink-faint" />
+          <span className="text-ink font-medium truncate max-w-[280px]">
+            {doc?.filename || '…'}
+          </span>
+        </div>
+        <Button variant="ghost" onClick={() => nav(-1)}>
+          <ArrowLeft size={14} strokeWidth={1.75} />
+          Back
+        </Button>
+      </Topbar>
+
+      <div className="flex-1 min-h-0 overflow-y-auto">
+        <motion.div
+          variants={fadeUp}
+          initial="hidden"
+          animate="show"
+          className="mx-auto max-w-3xl px-6 py-8 flex flex-col gap-6"
         >
-          Sign out
-        </button>
-      </aside>
-      <main className="main">
-        <header className="topbar">
-          <h2 style={{ margin: 0 }}>Document</h2>
-        </header>
-        <div className="content">
           {err && (
-            <div className="card" style={{ borderColor: 'var(--danger)' }} role="alert">
-              {err}
+            <div
+              role="alert"
+              className="rounded-lg border border-[var(--danger)]/30 bg-[var(--danger-bg)]/60 px-3.5 py-2.5 text-sm text-[var(--danger)] flex items-start gap-2"
+            >
+              <AlertCircle size={16} strokeWidth={1.75} className="mt-0.5 shrink-0" />
+              <span className="flex-1">{err}</span>
             </div>
           )}
+
           {!doc && !err && (
-            <div className="card" style={{ color: 'var(--text-dim)' }}>
-              Loading…
-            </div>
+            <Card className="p-5">
+              <div className="flex items-center gap-3">
+                <Skeleton className="h-9 w-9 rounded-lg" />
+                <div className="flex-1 space-y-2">
+                  <Skeleton className="h-3 w-48" />
+                  <Skeleton className="h-2.5 w-32" />
+                </div>
+              </div>
+              <div className="mt-4 space-y-2">
+                <Skeleton className="h-2 w-full" />
+                <Skeleton className="h-2 w-5/6" />
+                <Skeleton className="h-2 w-2/3" />
+              </div>
+            </Card>
           )}
+
           {doc && (
-            <div className="detail-page">
-              <Link to="/" className="detail-back">← Back to documents</Link>
+            <>
               <DocumentCard
                 doc={doc}
                 showOpen={false}
                 onDelete={() => setConfirmingDelete(true)}
               />
-              <div className="detail-chunks">
-                <h3>Indexed chunks</h3>
+
+              <Card className="p-5">
+                <div className="flex items-center justify-between mb-4">
+                  <div>
+                    <h2 className="text-base font-medium tracking-tight text-ink">Indexed chunks</h2>
+                    <p className="text-xs text-ink-dim mt-0.5">
+                      The pieces the retriever will surface in chat.
+                    </p>
+                  </div>
+                  <span className="text-xs text-ink-dim tabular-nums">
+                    {chunks?.length ?? '—'} chunks
+                  </span>
+                </div>
                 {chunks == null ? (
-                  <p style={{ color: 'var(--text-dim)' }}>Loading chunks…</p>
+                  <div className="space-y-2">
+                    <Skeleton className="h-2 w-full" />
+                    <Skeleton className="h-2 w-5/6" />
+                    <Skeleton className="h-2 w-2/3" />
+                  </div>
                 ) : chunks.length === 0 ? (
-                  <p style={{ color: 'var(--text-dim)' }}>
+                  <p className="text-sm text-ink-dim">
                     No chunks yet. Once indexing finishes, the chunk
                     contents will appear here.
                   </p>
                 ) : (
-                  chunks.map((c) => (
-                    <div key={c.id} className="detail-chunk">
-                      <div className="detail-chunk-meta">
-                        #{c.chunk_index}
-                        {c.page_number ? ` · page ${c.page_number}` : ''}
-                      </div>
-                      <div>{c.content}</div>
-                    </div>
-                  ))
+                  <ol className="flex flex-col gap-3">
+                    {chunks.map((c) => (
+                      <li
+                        key={c.id}
+                        className="rounded-lg border border-hairline bg-surface-2/30 p-3.5"
+                      >
+                        <div className="flex items-center gap-2 text-[11px] text-ink-faint uppercase tracking-wider mb-1.5">
+                          <FileText size={11} strokeWidth={1.75} />
+                          Chunk #{c.chunk_index}
+                          {c.page_number ? ` · page ${c.page_number}` : ''}
+                        </div>
+                        <p className="text-sm text-ink leading-relaxed whitespace-pre-wrap">
+                          {c.content}
+                        </p>
+                      </li>
+                    ))}
+                  </ol>
                 )}
-              </div>
-            </div>
+              </Card>
+            </>
           )}
-        </div>
-      </main>
+        </motion.div>
+      </div>
 
-      {confirmingDelete && doc && (
-        <div
-          className="modal-backdrop"
-          onClick={() => setConfirmingDelete(false)}
-          role="presentation"
-        >
-          <div
-            className="modal"
-            role="dialog"
-            aria-modal="true"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <h3>Delete document?</h3>
-            <p>
-              <strong>{doc.filename}</strong> and all of its
-              indexed chunks will be permanently removed.
-            </p>
-            <div className="actions">
-              <button
-                className="secondary"
-                onClick={() => setConfirmingDelete(false)}
-              >
-                Cancel
-              </button>
-              <button className="danger" onClick={handleDelete}>
-                Delete
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-    </div>
+      <Dialog
+        open={confirmingDelete}
+        onOpenChange={setConfirmingDelete}
+        size="sm"
+        title="Delete document?"
+        description={
+          <>
+            <strong className="font-medium text-ink">{doc?.filename}</strong>{' '}
+            and all of its indexed chunks will be permanently removed.
+          </>
+        }
+        footer={
+          <>
+            <Button variant="ghost" onClick={() => setConfirmingDelete(false)}>
+              Cancel
+            </Button>
+            <Button variant="danger" onClick={handleDelete}>
+              Delete
+            </Button>
+          </>
+        }
+      />
+    </AppShell>
   );
 }

@@ -11,16 +11,19 @@ Ollama's wire format predates OpenAI-compat for `/api/chat`:
 
 This adapter is the dedicated home for users who registered Ollama as
 a *connector* (i.e. they want it tracked like any other model, with
-usage rows + health). The built-in Ollama fallback in the router
-keeps using `OpenAICompatibleProvider` against Ollama's OpenAI-compat
-shim — that path stays unchanged so Phase 1 callers see no
-regression.
+usage rows + health), AND for the router's built-in Ollama fallback.
+Both paths resolve here: the registry maps `"ollama"` -> OllamaProvider
+(so `ModelRouter._build_adapter` constructs it for any
+`provider == "ollama"` connector), and `_ollama_fallback` constructs it
+directly when no connector is configured. The earlier OpenAI-compat
+shim path (POST {base_url}/chat/completions) 404'd against the default
+`OLLAMA_BASE_URL` (server root, no `/v1`); the native `/api/chat`
+endpoint works at the root.
 
 The orchestrator's `OllamaClient` (`app.services.llm.ollama`) is
 **not** replaced by this adapter. That client is a pre-PAL singleton
 still used by the embedding service and a couple of internal paths
-that don't go through `ModelRouter`. The router is the only caller
-of `OllamaProvider`.
+that don't go through `ModelRouter`.
 """
 from __future__ import annotations
 
@@ -46,6 +49,7 @@ from app.services.providers.base import (
     LLMResponse,
     ProviderAdapter,
     ProviderError,
+    _summarize_request,
 )
 
 log = get_logger(__name__)
@@ -138,9 +142,9 @@ class OllamaProvider(ProviderAdapter):
         self,
         *,
         base_url: str,
-        api_key: Optional[str] = None,  # Ollama doesn't use one
-        auth_type: str = "none",  # default
-        auth_header_name: Optional[str] = None,  # ignored
+        api_key: Optional[str] = None,  # unused for local Ollama; required for ollama.com cloud
+        auth_type: str = "none",  # default; users with cloud set "bearer"
+        auth_header_name: Optional[str] = None,
         custom_headers: Optional[dict[str, str]] = None,
         organization_id: Optional[str] = None,  # ignored
         project_id: Optional[str] = None,  # ignored
@@ -152,8 +156,9 @@ class OllamaProvider(ProviderAdapter):
         # SSRF: enforced by the router. Loopback is allowed — users
         # frequently point at http://localhost:11434.
         self.base_url = base_url.rstrip("/")
-        self.api_key = api_key  # unused; kept for signature parity
+        self.api_key = api_key
         self.auth_type = auth_type
+        self.auth_header_name = auth_header_name
         self.custom_headers = custom_headers or {}
         self.default_model = default_model
         self.models = list(models or [])
@@ -166,11 +171,20 @@ class OllamaProvider(ProviderAdapter):
         await self._client.aclose()
 
     def _headers(self) -> dict[str, str]:
-        h: dict[str, str] = {"Content-Type": "application/json"}
-        if self.custom_headers:
-            for k, v in self.custom_headers.items():
-                h[str(k)] = str(v)
-        return h
+        # Local Ollama ignores auth, but the hosted ollama.com cloud
+        # requires `Authorization: Bearer <key>`. Use the same
+        # bearer/header/basic logic the OpenAI-compat adapter uses,
+        # so a connector registered with `auth_type=bearer` works
+        # against both targets. `custom_headers` are merged last so
+        # they can override anything we set above.
+        from app.services.providers.openai_compat import _build_auth_headers
+
+        return _build_auth_headers(
+            self.api_key,
+            self.auth_type,
+            self.auth_header_name,
+            self.custom_headers,
+        )
 
     def _resolve_model(self, req: ChatRequest) -> str:
         return req.model or self.default_model
@@ -196,6 +210,33 @@ class OllamaProvider(ProviderAdapter):
         if req.tools:
             # Ollama accepts OpenAI-style tool defs unchanged.
             payload["tools"] = list(req.tools)
+
+        # Debug log: captures the URL, headers (auth redacted), model,
+        # message fingerprint, and option keys. Together with the
+        # `llm.debug.response` log on the orchestrator side, an operator
+        # can correlate a 4xx from the upstream with the exact request
+        # shape. Never logs message contents.
+        try:
+            log.info(
+                "llm.debug.request",
+                adapter=self.name,
+                stream=False,
+                **_summarize_request(
+                    provider=self.name,
+                    base_url=self.base_url,
+                    endpoint="/api/chat",
+                    model=model,
+                    headers=self._headers(),
+                    messages=req.messages,
+                    tools=req.tools,
+                    options=opts,
+                    extra={"payload_keys": sorted(payload.keys())},
+                ),
+            )
+        except Exception:  # noqa: BLE001
+            # Logging is best-effort; a malformed payload must not
+            # break the call.
+            pass
 
         try:
             r = await self._client.post("/api/chat", json=payload, headers=self._headers())
@@ -251,6 +292,27 @@ class OllamaProvider(ProviderAdapter):
             payload["options"] = opts
         if req.tools:
             payload["tools"] = list(req.tools)
+
+        # See ``chat()`` for the rationale on this log line.
+        try:
+            log.info(
+                "llm.debug.request",
+                adapter=self.name,
+                stream=True,
+                **_summarize_request(
+                    provider=self.name,
+                    base_url=self.base_url,
+                    endpoint="/api/chat",
+                    model=model,
+                    headers=self._headers(),
+                    messages=req.messages,
+                    tools=req.tools,
+                    options=opts,
+                    extra={"payload_keys": sorted(payload.keys())},
+                ),
+            )
+        except Exception:  # noqa: BLE001
+            pass
 
         try:
             async with self._client.stream(

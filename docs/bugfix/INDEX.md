@@ -84,3 +84,89 @@ A separate, later audit focused on **UI state not updating after actions / non-s
 (not security). It confirmed **19 unique findings (+2 second-lens duplicates, +3 rejected)**
 across 5 lenses (auth-state-sync, chat-stream-reconcile, documents-ui, routing-navigation,
 css-ux-smoothness) — all fixed. See [`frontend-ui-state.md`](./frontend-ui-state.md).
+
+## User-reported follow-up: Chat 404, Chat sidebar, /auth/me 401
+
+A user-reported bug trio from the running app (2026-07-06), root-caused
+and adversarially verified before fixing:
+
+- **High / functional** — Chat to the Ollama model 404'd ("404 page not
+  found") because `ModelRouter` routed Ollama to `OpenAICompatibleProvider`
+  (POST `{base_url}/chat/completions`) while Ollama's OpenAI-compat shim
+  lives at `/v1/chat/completions`; the default `OLLAMA_BASE_URL` has no
+  `/v1`. Fixed by routing Ollama to the already-implemented `OllamaProvider`
+  (native `/api/chat`) in both `_build_adapter` and `_ollama_fallback`.
+- **High / visual** — The chat-tab sidebar collapsed because `ChatSidebar`
+  returned a bare fragment instead of the `<aside>` rail `AppShell`'s flex
+  row expects. Fixed by wrapping it in the same `<aside>` the default
+  `Sidebar` uses.
+- **Benign → polished** — The `/api/auth/me` 401 was the expected first
+  attempt of the refresh-on-401 flow (the user stays logged in). Polished
+  by proactively redeeming the refresh token before `/me` when the access
+  token's JWT `exp` is already past, removing the console noise and saving
+  a round-trip.
+
+See [`chat-ollama-sidebar-auth.md`](./chat-ollama-sidebar-auth.md).
+
+## Feature: Conversation rename + auto-naming (2026-07-06)
+
+Added a rename (pencil) button in the chat sidebar, before the delete
+button, and named new conversations from the first 100 chars of the
+user's first query. Backend `PATCH /chat/conversations/{id}` (ownership
+filter → cross-tenant 404, not 403) + `ConversationRename` schema
+(strip + 1..100 chars, `extra="forbid"`); `agent._ensure_conversation`
+cap aligned 120→100. The UI was hardened by a 4-dimension adversarial
+review Workflow — invisible-button click interception, touch/keyboard
+reachability, silent-failure toasts, focus restoration on edit close,
+edit-row styling, long-title occlusion, stale docs, and a router-level
+unit test. See [`chat-conversation-rename.md`](./chat-conversation-rename.md).
+
+## Bug: Dialog popups opened off-center (2026-07-06)
+
+A user reported popups not opening at the center of the screen. Root
+cause (adversarially verified by a 4-dimension Workflow): the centered
+`Dialog` combined Tailwind `-translate-x-1/2 -translate-y-1/2` with a
+Framer Motion `scaleIn` animation on the same element — Framer writes
+the animated `scale` as an inline `style.transform`, which overrides
+Tailwind's class-level `transform`, so the `-50%/-50%` centering
+translate was lost and the dialog's top-left corner landed at viewport
+center (shifted down-and-right). Fix: move the centering into Framer's
+own `style={{ x: '-50%', y: '-50%' }}`. Also fixed a confirmed sibling
+defect — a dialog taller than the viewport was clipped with no scroll
+region (Radix's body scroll lock then made it unreachable); added
+`max-h` + a flex-column scroll region. A repo-wide sweep confirmed
+only `Dialog.jsx` had the transform conflict (Sheet/Toaster/Tooltip/
+DropdownMenu/Select and all page-level motion elements are clean). See
+[`dialog-centering.md`](./dialog-centering.md).
+
+## Bug: Read-only container errno 30 on `/home/athena/.cache` during indexing (2026-07-06)
+
+Indexing a file failed with `[Errno 30] Read-only file system:
+'/home/athena/.cache'`. The `api` container is `read_only: true` and runs
+as the non-root user `athena` (`HOME=/home/athena`), but the tmpfs was
+mounted at `/root/.cache` (root's home) — so `~/.cache` for the runtime
+user was on the read-only rootfs, and `sentence-transformers`/`huggingface_hub`
+(tried to) write the embedding model there. Worse, the build-time model
+pre-download ran as root, baking the model to `/root/.cache/huggingface` —
+unreachable by the `athena` runtime user and shadowed by the tmpfs. Fix
+(Dockerfile + compose, adversarially verified): bake the HF model and
+tiktoken's `cl100k_base` into non-home, non-tmpfs paths (`/opt/hf-cache`,
+`/opt/tiktoken-cache`), `chown` them to `athena`, set `HF_HUB_OFFLINE=1`
++ `TRANSFORMERS_OFFLINE=1` at runtime so the load is a pure read with no
+cache writes, and repoint the compose tmpfs to `/home/athena/.cache`. See
+[`readonly-cache-errno30.md`](./readonly-cache-errno30.md).
+
+## Bug: "Test before saving" 422 — `is_enabled/is_admin/is_favorite/group_name/tags: Extra inputs are not permitted` (2026-07-08)
+
+Clicking "Test before saving" in the connector create/edit dialog
+returned a 422 listing `is_enabled`, `is_admin`, `is_favorite`,
+`group_name`, `tags` as extra inputs. The dialog builds one `payload`
+shared between the save path (`ModelConnectorCreate`/`Update`, which
+accept those flags) and the test path (`TestRequest`, which does not and
+inherits `extra="forbid"`). The live-probe branch already hand-picked
+`TestRequest`-compatible keys; only the `payload` branch forwarded the
+whole object. Fix (adversarially verified, frontend-only — the backend
+strict schema stays as the H-22 mass-assignment defense): in
+`TestPanel.jsx`, allowlist exactly the 15 `TestRequest` fields via a
+key-membership `toTestPayload()` mapper before `POST /api/connectors/test`.
+See [`connector-test-extra-forbid.md`](./connector-test-extra-forbid.md).

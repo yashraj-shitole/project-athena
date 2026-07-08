@@ -163,6 +163,110 @@ class ProviderAdapter(abc.ABC):
         """Release any pooled resources. Default: no-op."""
 
 
+# --- Wire-format debugging -----------------------------------------------
+#
+# Every adapter's `chat()` / `stream()` should log the payload it is
+# about to send to the upstream so an operator can correlate a
+# provider-side 4xx (e.g. "401 Unauthorized") with the exact request
+# shape. The auth header is the most useful field to see during a
+# 4xx but is also the most sensitive — `_redact_auth_header` masks
+# everything past the scheme, so the log line is safe to ship to a
+# centralized aggregator.
+
+_AUTH_HEADER_NAMES = frozenset({"authorization", "x-api-key", "api-key"})
+
+
+def _redact_auth_header(headers: dict[str, str]) -> dict[str, str]:
+    """Return a copy of `headers` with sensitive auth values masked.
+
+    The scheme word ("Bearer", "Basic") is preserved so an operator
+    can confirm the wire format; the secret is replaced with
+    "***<last 4 chars>". Headers that are not in the auth set are
+    passed through unchanged.
+    """
+    out: dict[str, str] = {}
+    for k, v in headers.items():
+        lk = k.lower()
+        if lk in _AUTH_HEADER_NAMES and v:
+            parts = v.split(" ", 1)
+            if len(parts) == 2:
+                scheme, secret = parts
+                tail = secret[-4:] if len(secret) >= 4 else "***"
+                out[k] = f"{scheme} ****{tail}"
+            else:
+                # no scheme prefix (e.g. "x-api-key: sk-...")
+                tail = v[-4:] if len(v) >= 4 else "***"
+                out[k] = f"***{tail}"
+        else:
+            out[k] = v
+    return out
+
+
+def _fingerprint_messages(messages: Any) -> dict[str, Any]:
+    """Structural fingerprint of a message list — no content."""
+    if not isinstance(messages, list):
+        return {"count": 0, "roles": {}, "total_chars": 0, "first_user_chars": 0}
+    roles: dict[str, int] = {}
+    total = 0
+    first_user = 0
+    for m in messages:
+        if not isinstance(m, dict):
+            continue
+        role = str(m.get("role", "unknown"))
+        roles[role] = roles.get(role, 0) + 1
+        content = m.get("content")
+        if isinstance(content, str):
+            n = len(content)
+        elif content is None:
+            n = 0
+        else:
+            # List-of-parts (vision / tool result). Use the repr size
+            # as a cheap proxy.
+            n = len(repr(content))
+        total += n
+        if role == "user" and first_user == 0:
+            first_user = n
+    return {
+        "count": len(messages),
+        "roles": roles,
+        "total_chars": total,
+        "first_user_chars": first_user,
+    }
+
+
+def _summarize_request(
+    *,
+    provider: str,
+    base_url: str,
+    endpoint: str,
+    model: str,
+    headers: dict[str, str],
+    messages: Any,
+    tools: Any,
+    options: Any,
+    extra: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    """Build the structured-payload dict for the ``llm.debug.request``
+    log line. The auth header is masked via :func:`_redact_auth_header`
+    so the secret is never written to the log.
+    """
+    summary: dict[str, Any] = {
+        "provider": provider,
+        "base_url": base_url,
+        "endpoint": endpoint,
+        "model": model,
+        "headers": _redact_auth_header(headers),
+        **_fingerprint_messages(messages),
+        "has_tools": bool(tools),
+        "tools_count": len(tools) if isinstance(tools, list) else 0,
+        "has_options": bool(options),
+        "option_keys": sorted(options.keys()) if isinstance(options, dict) else [],
+    }
+    if extra:
+        summary.update(extra)
+    return summary
+
+
 __all__ = [
     "CAT_OK",
     "CAT_AUTH",

@@ -7,7 +7,9 @@ import {
 } from 'react-router-dom';
 import App, { isSafeNext } from './App.jsx';
 import { AUTH_EVENT } from './services/apiClient.js';
-import './styles.css';
+import { ToastProvider } from './components/ui/Toaster.jsx';
+import { TooltipProvider } from './components/ui/Tooltip.jsx';
+import './index.css';
 
 /**
  * Listens for `athena:auth-failed` (dispatched by apiClient on 401)
@@ -41,9 +43,13 @@ function AuthBoundary({ children }) {
 ReactDOM.createRoot(document.getElementById('root')).render(
   <React.StrictMode>
     <BrowserRouter>
-      <AuthBoundary>
-        <App />
-      </AuthBoundary>
+      <TooltipProvider>
+        <ToastProvider>
+          <AuthBoundary>
+            <App />
+          </AuthBoundary>
+        </ToastProvider>
+      </TooltipProvider>
     </BrowserRouter>
   </React.StrictMode>,
 );

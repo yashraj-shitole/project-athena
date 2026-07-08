@@ -7,6 +7,8 @@
  * renders a small pill for each that is true.
  */
 import React from 'react';
+import { MessageSquare, Zap, Wrench, Eye, Binary, Braces, ClipboardList } from 'lucide-react';
+import Badge from '../ui/Badge.jsx';
 
 const LABELS = {
   chat: 'Chat',
@@ -19,29 +21,32 @@ const LABELS = {
 };
 
 const ICONS = {
-  chat: '💬',
-  stream: '⚡',
-  tools: '🛠',
-  vision: '👁',
-  embeddings: '🧮',
-  json_mode: '{ }',
-  structured: '📋',
+  chat: MessageSquare,
+  stream: Zap,
+  tools: Wrench,
+  vision: Eye,
+  embeddings: Binary,
+  json_mode: Braces,
+  structured: ClipboardList,
 };
 
 export default function CapabilityBadges({ capabilities }) {
   if (!capabilities || typeof capabilities !== 'object') return null;
   const enabled = Object.entries(capabilities).filter(([, v]) => !!v);
   if (!enabled.length) {
-    return <span className="capability-empty">no capabilities detected</span>;
+    return <span className="text-xs text-ink-faint italic">no capabilities detected</span>;
   }
   return (
-    <div className="capability-row">
-      {enabled.map(([k]) => (
-        <span key={k} className="capability-badge" title={LABELS[k] || k}>
-          <span className="capability-icon">{ICONS[k] || '•'}</span>
-          {LABELS[k] || k}
-        </span>
-      ))}
+    <div className="flex flex-wrap gap-1.5">
+      {enabled.map(([k]) => {
+        const Icon = ICONS[k];
+        return (
+          <Badge key={k} tone="neutral" size="md" title={LABELS[k] || k}>
+            {Icon && <Icon size={11} strokeWidth={1.75} />}
+            {LABELS[k] || k}
+          </Badge>
+        );
+      })}
     </div>
   );
 }

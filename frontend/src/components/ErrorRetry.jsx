@@ -1,4 +1,6 @@
 import React from 'react';
+import { AlertCircle, RefreshCw } from 'lucide-react';
+import Button from './ui/Button.jsx';
 
 /**
  * Inline error card with a Retry Processing button. Used inside the
@@ -7,19 +9,39 @@ import React from 'react';
  */
 export default function ErrorRetry({ error, onRetry, retrying = false }) {
   return (
-    <div className="error-retry" role="alert">
-      <div className="error-retry-title">Processing failed</div>
-      <div className="error-retry-msg">
-        {error || 'An unknown error occurred during ingestion.'}
+    <div
+      role="alert"
+      className="rounded-lg border border-[var(--danger)]/30 bg-[var(--danger-bg)]/60 px-4 py-3 flex flex-col gap-2"
+    >
+      <div className="flex items-start gap-2">
+        <AlertCircle size={16} strokeWidth={1.75} className="mt-0.5 text-[var(--danger)] shrink-0" />
+        <div className="min-w-0 flex-1">
+          <p className="text-sm font-medium text-[var(--danger)]">Processing failed</p>
+          <p className="text-sm text-ink leading-relaxed break-words">
+            {error || 'An unknown error occurred during ingestion.'}
+          </p>
+        </div>
       </div>
       {onRetry && (
-        <button
-          className="error-retry-btn"
+        <Button
+          variant="danger"
+          size="sm"
           onClick={onRetry}
           disabled={retrying}
+          className="self-start"
         >
-          {retrying ? 'Retrying…' : 'Retry processing'}
-        </button>
+          {retrying ? (
+            <>
+              <RefreshCw size={14} strokeWidth={1.75} className="animate-spin" />
+              Retrying…
+            </>
+          ) : (
+            <>
+              <RefreshCw size={14} strokeWidth={1.75} />
+              Retry processing
+            </>
+          )}
+        </Button>
       )}
     </div>
   );

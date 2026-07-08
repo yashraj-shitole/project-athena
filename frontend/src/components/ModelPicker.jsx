@@ -19,6 +19,8 @@ import React, { useEffect, useState } from 'react';
 import useConnectorsStore from '../store/connectorsStore.js';
 import apiClient from '../services/apiClient.js';
 import HealthBadge from './connectors/HealthBadge.jsx';
+import Select from './ui/Select.jsx';
+import { Tooltip } from './ui/Tooltip.jsx';
 
 const BUILTIN = {
   id: null,
@@ -87,15 +89,15 @@ export default function ModelPicker() {
   );
 
   return (
-    <div className="model-picker">
-      <label className="model-picker-label" htmlFor="model-picker-select">
+    <div className="flex items-center gap-2">
+      <label htmlFor="model-picker-select" className="text-xs text-ink-dim hidden sm:inline">
         Model
       </label>
-      <select
+      <Select
         id="model-picker-select"
-        className="model-picker-select"
         value={value}
         onChange={onChange}
+        className="w-[280px]"
         title="Choose which model handles this conversation"
       >
         <optgroup label="Built-in">
@@ -147,7 +149,7 @@ export default function ModelPicker() {
               ))}
           </optgroup>
         )}
-      </select>
+      </Select>
       {activeModel.connectorId && (
         <ActiveHealth
           connectorId={activeModel.connectorId}
@@ -162,9 +164,11 @@ function ActiveHealth({ connectorId, list }) {
   const c = list.find((x) => x.id === connectorId);
   if (!c || !c.last_health) return null;
   return (
-    <span className="model-picker-health">
-      <HealthBadge status={c.last_health} latencyMs={c.last_health_latency_ms} />
-    </span>
+    <Tooltip content={c.last_health_latency_ms ? `Last probe: ${c.last_health_latency_ms}ms` : c.last_health}>
+      <span className="inline-flex">
+        <HealthBadge status={c.last_health} latencyMs={c.last_health_latency_ms} />
+      </span>
+    </Tooltip>
   );
 }
 

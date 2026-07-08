@@ -77,15 +77,26 @@ export const useChatStore = create((set, get) => ({
     }
   },
 
-  async startNew() {
+  async startNew(firstMessage) {
     if (get().startNewInFlight) {
       // Return the in-flight id if we can, else null.
       return get().active;
     }
     set({ startNewInFlight: true });
     try {
+      // Name the conversation from the user's first query — first 100
+      // chars, trimmed — so the sidebar shows something meaningful
+      // instead of the generic "New conversation". This runs at send
+      // time (onSend passes the user's text), so the title is set on
+      // the create call; the server's stream_turn then sees an
+      // existing conversation_id and leaves the title untouched.
+      // Falls back to "New conversation" when there's no seed
+      // (defensive — startNew is currently only called from onSend,
+      // which always has text). Matches the server's 100-char cap in
+      // agent._ensure_conversation for the non-UI creation path.
+      const seed = (firstMessage || '').trim().slice(0, 100);
       const conv = await apiClient.post('/chat/conversations', {
-        title: 'New conversation',
+        title: seed || 'New conversation',
       });
       // De-dupe in case the user clicked twice before the first
       // response came back.
@@ -116,6 +127,38 @@ export const useChatStore = create((set, get) => ({
       }
     } catch (e) {
       set({ error: e.message });
+      // Re-throw so the caller (ChatInterface) can toast the failure
+      // instead of silently leaving the row in place.
+      throw e;
+    }
+  },
+
+  async renameConversation(id, title) {
+    // Trim + cap client-side to match the schema (the server rejects
+    // empty-after-strip with a 422, but we avoid the round-trip for an
+    // obviously-empty rename). On success, patch the title (and the
+    // server-bumped updated_at) into the list in place — we do NOT
+    // reorder, so the row doesn't jump out from under the user mid-
+    // edit; the next loadConversations will reflect the new order.
+    const clean = (title || '').trim().slice(0, 100);
+    if (!clean) return;
+    try {
+      const updated = await apiClient.patch(`/chat/conversations/${id}`, {
+        title: clean,
+      });
+      set({
+        conversations: get().conversations.map((c) =>
+          c.id === id
+            ? { ...c, title: updated.title, updated_at: updated.updated_at }
+            : c,
+        ),
+      });
+    } catch (e) {
+      set({ error: e.message });
+      // Re-throw so the caller (ChatInterface) can toast the failure —
+      // the input has already closed, so without a toast a failed rename
+      // silently reverts the row to the old title with zero feedback.
+      throw e;
     }
   },
 

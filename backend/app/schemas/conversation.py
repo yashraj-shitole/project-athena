@@ -3,9 +3,9 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Any, List
+from typing import Annotated, Any, List
 
-from pydantic import Field
+from pydantic import Field, StringConstraints
 
 from app.schemas.base import ORMModelBase, RequestBase
 from app.schemas.chunk import Citation
@@ -13,6 +13,20 @@ from app.schemas.chunk import Citation
 
 class ConversationCreate(RequestBase):
     title: str | None = None
+
+
+class ConversationRename(RequestBase):
+    """Rename a conversation.
+
+    The title is stripped and capped at 100 chars to match the
+    auto-name derived from the user's first query (see
+    ``chatStore.startNew`` and ``agent._ensure_conversation``). Empty
+    after stripping is rejected with a 422 so a rename can never blank
+    a conversation's title. ``extra="forbid"`` (inherited from
+    RequestBase) prevents mass-assignment of ``user_id`` / ``id`` etc.
+    """
+
+    title: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=100)]
 
 
 class ConversationPublic(ORMModelBase):

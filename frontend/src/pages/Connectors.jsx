@@ -11,6 +11,7 @@
  * and the audit trail in one place.
  */
 import React, { useEffect, useState } from 'react';
+import { Plus, RefreshCw, Loader2, AlertCircle } from 'lucide-react';
 import useConnectorsStore from '../store/connectorsStore.js';
 import ConnectorCard from '../components/connectors/ConnectorCard.jsx';
 import ConnectorDialog from '../components/connectors/ConnectorDialog.jsx';
@@ -18,6 +19,17 @@ import ModelDiscoveryPanel from '../components/connectors/ModelDiscoveryPanel.js
 import UsageDashboard from '../components/connectors/UsageDashboard.jsx';
 import AuditLogTable from '../components/connectors/AuditLogTable.jsx';
 import TestPanel from '../components/connectors/TestPanel.jsx';
+import AppShell from '../components/ui/AppShell.jsx';
+import Topbar from '../components/ui/Topbar.jsx';
+import PageHeader from '../components/ui/PageHeader.jsx';
+import Button from '../components/ui/Button.jsx';
+import Sheet from '../components/ui/Sheet.jsx';
+import Tabs, { TabsList, TabsTrigger, TabsContent } from '../components/ui/Tabs.jsx';
+import EmptyState from '../components/ui/EmptyState.jsx';
+import { useToast } from '../components/ui/Toaster.jsx';
+import { motion, AnimatePresence } from 'framer-motion';
+import { fadeUp } from '../components/ui/Motion.jsx';
+import { Brain as BrainIcon } from 'lucide-react';
 
 export default function Connectors() {
   const {
@@ -37,6 +49,7 @@ export default function Connectors() {
   const [selected, setSelected] = useState(null);   // ModelConnectorPublic | null
   const [tab, setTab] = useState('overview');       // overview|usage|audit|models|test
   const [busy, setBusy] = useState(false);
+  const toast = useToast();
 
   useEffect(() => {
     load(true);
@@ -44,30 +57,63 @@ export default function Connectors() {
 
   const onCreate = async (payload) => {
     setBusy(true);
-    try { await create(payload); }
-    finally { setBusy(false); }
+    try {
+      await create(payload);
+      toast.show('Connector created.', { tone: 'success' });
+    } catch (e) {
+      toast.show(e.message || 'Could not create connector.', { tone: 'error' });
+      throw e;
+    } finally {
+      setBusy(false);
+    }
   };
   const onUpdate = async (payload) => {
     if (!editing || editing === 'new') return;
     setBusy(true);
-    try { await update(editing.id, payload); }
-    finally { setBusy(false); }
+    try {
+      await update(editing.id, payload);
+      toast.show('Connector updated.', { tone: 'success' });
+    } catch (e) {
+      toast.show(e.message || 'Could not update connector.', { tone: 'error' });
+      throw e;
+    } finally {
+      setBusy(false);
+    }
   };
   const onDelete = async (c) => {
     if (!confirm(`Delete "${c.name}"? This is reversible by an admin (soft delete).`)) return;
     setBusy(true);
-    try { await remove(c.id); if (selected?.id === c.id) setSelected(null); }
-    finally { setBusy(false); }
+    try {
+      await remove(c.id);
+      if (selected?.id === c.id) setSelected(null);
+      toast.show(`Deleted "${c.name}".`, { tone: 'success' });
+    } catch (e) {
+      toast.show(e.message || 'Could not delete connector.', { tone: 'error' });
+    } finally {
+      setBusy(false);
+    }
   };
   const onClone = async (c) => {
     setBusy(true);
-    try { await clone(c.id); }
-    finally { setBusy(false); }
+    try {
+      await clone(c.id);
+      toast.show('Connector cloned. Re-enter the API key to enable it.', { tone: 'success' });
+    } catch (e) {
+      toast.show(e.message || 'Could not clone connector.', { tone: 'error' });
+    } finally {
+      setBusy(false);
+    }
   };
   const onSetDefault = async (c) => {
     setBusy(true);
-    try { await setDefault(c.id); }
-    finally { setBusy(false); }
+    try {
+      await setDefault(c.id);
+      toast.show(`"${c.name}" is now your default.`, { tone: 'success' });
+    } catch (e) {
+      toast.show(e.message || 'Could not set default.', { tone: 'error' });
+    } finally {
+      setBusy(false);
+    }
   };
 
   const onTest = (c) => {
@@ -76,91 +122,96 @@ export default function Connectors() {
   };
 
   return (
-    <div className="page connectors-page">
-      <div className="connectors-header">
-        <h1>External Model Connectors</h1>
-        <p className="connectors-blurb">
-          Register AI providers (OpenAI, Anthropic, Gemini, Azure, Ollama, or a
-          custom REST endpoint) and have them act exactly like the built-in
-          model. API keys are encrypted at rest; you can rotate them at any
-          time. <a href="/docs/connectors" target="_blank" rel="noreferrer">Learn more</a>.
-        </p>
-        <div className="connectors-toolbar">
-          <button
-            type="button"
-            className="primary"
-            onClick={() => setEditing('new')}
-            disabled={busy}
-          >
-            + Add connector
-          </button>
-          <button type="button" onClick={() => load(true)} disabled={loading}>
-            {loading ? 'Refreshing…' : 'Refresh'}
-          </button>
+    <AppShell>
+      <Topbar>
+        <div className="flex items-center gap-2">
+          <h1 className="text-base font-medium tracking-tight text-ink">Models</h1>
         </div>
-      </div>
+        <div className="flex items-center gap-2">
+          <Button
+            variant="ghost"
+            onClick={() => load(true)}
+            disabled={loading}
+          >
+            {loading ? <Loader2 size={14} strokeWidth={1.75} className="animate-spin" /> : <RefreshCw size={14} strokeWidth={1.75} />}
+            {loading ? 'Refreshing…' : 'Refresh'}
+          </Button>
+          <Button onClick={() => setEditing('new')} disabled={busy}>
+            <Plus size={14} strokeWidth={1.75} />
+            Add connector
+          </Button>
+        </div>
+      </Topbar>
 
-      {error && <div className="test-panel-error">⚠ {error}</div>}
+      <div className="flex-1 min-h-0 overflow-y-auto">
+        <div className="mx-auto max-w-5xl px-6 py-8 flex flex-col gap-6">
+          <PageHeader
+            eyebrow="Connectors"
+            title="External model providers"
+            blurb="Register AI providers (OpenAI, Anthropic, Gemini, Azure, Ollama, or a custom REST endpoint) and have them act exactly like the built-in model. API keys are encrypted at rest; rotate them at any time."
+          />
 
-      <div className="connectors-grid">
-        <div className="connectors-list">
-          {!list.length && !loading && (
-            <div className="connectors-empty">
-              No connectors yet. Click <strong>Add connector</strong> to register
-              your first external model.
+          {error && (
+            <div
+              role="alert"
+              className="rounded-lg border border-[var(--danger)]/30 bg-[var(--danger-bg)]/60 px-3.5 py-2.5 text-sm text-[var(--danger)] flex items-start gap-2"
+            >
+              <AlertCircle size={16} strokeWidth={1.75} className="mt-0.5 shrink-0" />
+              <span className="flex-1">{error}</span>
             </div>
           )}
-          {list.map((c) => (
-            <ConnectorCard
-              key={c.id}
-              connector={c}
-              onEdit={(c) => setEditing(c)}
-              onDelete={onDelete}
-              onClone={onClone}
-              onSetDefault={onSetDefault}
-              onTest={onTest}
-              onRefreshModels={(c) => { setSelected(c); setTab('models'); }}
-              onViewUsage={(c) => { setSelected(c); setTab('usage'); }}
-              onViewAudit={(c) => { setSelected(c); setTab('audit'); }}
-              testing={busy}
-            />
-          ))}
-        </div>
 
-        {selected && (
-          <div className="connectors-detail">
-            <div className="connectors-detail-header">
-              <h2>{selected.name}</h2>
-              <button
-                type="button"
-                className="modal-close"
-                onClick={() => setSelected(null)}
-                aria-label="Close detail"
-              >
-                ×
-              </button>
-            </div>
-            <div className="tab-bar">
-              {['overview', 'usage', 'models', 'audit', 'test'].map((t) => (
-                <button
-                  key={t}
-                  type="button"
-                  className={tab === t ? 'tab tab-active' : 'tab'}
-                  onClick={() => setTab(t)}
-                >
-                  {t}
-                </button>
-              ))}
-            </div>
-            <div className="tab-body">
-              {tab === 'overview' && <OverviewTab connector={selected} />}
-              {tab === 'usage' && <UsageDashboard connector={selected} />}
-              {tab === 'models' && <ModelDiscoveryPanel connector={selected} />}
-              {tab === 'audit' && <AuditLogTable connector={selected} />}
-              {tab === 'test' && <TestPanel connector={selected} />}
-            </div>
-          </div>
-        )}
+          {list.length === 0 && !loading ? (
+            <EmptyState
+              icon={BrainIcon}
+              title="No connectors yet"
+              description="Register an external model provider to route Athena's chat through it — or rely on the built-in Ollama fallback."
+              primaryAction={
+                <Button onClick={() => setEditing('new')}>
+                  <Plus size={14} strokeWidth={1.75} />
+                  Add your first connector
+                </Button>
+              }
+            />
+          ) : (
+            <motion.div
+              variants={fadeUp}
+              initial="hidden"
+              animate="show"
+              className="grid grid-cols-1 lg:grid-cols-2 gap-3"
+            >
+              <AnimatePresence initial={false}>
+                {list.map((c, i) => (
+                  <motion.div
+                    key={c.id}
+                    layout
+                    initial={{ opacity: 0, y: 6 }}
+                    animate={{ opacity: 1, y: 0, transition: { delay: i * 0.02 } }}
+                    exit={{ opacity: 0 }}
+                    onClick={() => setSelected(c)}
+                    role="button"
+                    tabIndex={0}
+                    onKeyDown={(e) => { if (e.key === 'Enter') setSelected(c); }}
+                    className="cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-hairline-strong focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded-xl"
+                  >
+                    <ConnectorCard
+                      connector={c}
+                      onEdit={(c) => setEditing(c)}
+                      onDelete={onDelete}
+                      onClone={onClone}
+                      onSetDefault={onSetDefault}
+                      onTest={onTest}
+                      onRefreshModels={(c) => { setSelected(c); setTab('models'); }}
+                      onViewUsage={(c) => { setSelected(c); setTab('usage'); }}
+                      onViewAudit={(c) => { setSelected(c); setTab('audit'); }}
+                      testing={busy}
+                    />
+                  </motion.div>
+                ))}
+              </AnimatePresence>
+            </motion.div>
+          )}
+        </div>
       </div>
 
       <ConnectorDialog
@@ -170,7 +221,48 @@ export default function Connectors() {
         onClose={() => setEditing(null)}
         onSubmit={editing === 'new' ? onCreate : onUpdate}
       />
-    </div>
+
+      <Sheet
+        open={!!selected}
+        onOpenChange={(o) => { if (!o) setSelected(null); }}
+        title={selected?.name}
+        description={selected ? (
+          <span className="text-xs">
+            <code className="bg-surface-2 px-1.5 py-0.5 rounded">{selected.provider}</code>
+            <span className="mx-1.5 text-ink-faint">·</span>
+            <code>{selected.default_model}</code>
+          </span>
+        ) : null}
+        width="lg"
+      >
+        {selected && (
+          <Tabs value={tab} onValueChange={setTab}>
+            <TabsList>
+              <TabsTrigger value="overview">Overview</TabsTrigger>
+              <TabsTrigger value="usage">Usage</TabsTrigger>
+              <TabsTrigger value="models">Models</TabsTrigger>
+              <TabsTrigger value="audit">Audit</TabsTrigger>
+              <TabsTrigger value="test">Test</TabsTrigger>
+            </TabsList>
+            <TabsContent value="overview">
+              <OverviewTab connector={selected} />
+            </TabsContent>
+            <TabsContent value="usage">
+              <UsageDashboard connector={selected} />
+            </TabsContent>
+            <TabsContent value="models">
+              <ModelDiscoveryPanel connector={selected} />
+            </TabsContent>
+            <TabsContent value="audit">
+              <AuditLogTable connector={selected} />
+            </TabsContent>
+            <TabsContent value="test">
+              <TestPanel connector={selected} />
+            </TabsContent>
+          </Tabs>
+        )}
+      </Sheet>
+    </AppShell>
   );
 }
 
@@ -184,7 +276,7 @@ function OverviewTab({ connector }) {
     consecutive_failures, created_at, updated_at,
   } = connector;
   return (
-    <div className="overview-tab">
+    <div className="flex flex-col gap-3 text-sm">
       <Field label="Provider" value={provider} mono />
       <Field label="Base URL" value={base_url} mono />
       <Field label="Default model" value={default_model} mono />
@@ -253,16 +345,18 @@ function OverviewTab({ connector }) {
 function Field({ label, value, mono, code }) {
   if (code) {
     return (
-      <div className="overview-field">
-        <span className="overview-label">{label}</span>
-        <pre className="overview-code">{value}</pre>
+      <div className="grid grid-cols-[140px_1fr] gap-3 items-baseline">
+        <span className="text-[10px] font-medium uppercase tracking-wider text-ink-faint">{label}</span>
+        <pre className="font-mono text-xs bg-surface-2/50 border border-hairline rounded-md px-2.5 py-2 max-h-[200px] overflow-y-auto whitespace-pre-wrap break-words m-0">
+          {value}
+        </pre>
       </div>
     );
   }
   return (
-    <div className="overview-field">
-      <span className="overview-label">{label}</span>
-      <span className={mono ? 'overview-value mono' : 'overview-value'}>
+    <div className="grid grid-cols-[140px_1fr] gap-3 items-baseline">
+      <span className="text-[10px] font-medium uppercase tracking-wider text-ink-faint">{label}</span>
+      <span className={mono ? 'font-mono text-xs break-words' : 'break-words'}>
         {value}
       </span>
     </div>

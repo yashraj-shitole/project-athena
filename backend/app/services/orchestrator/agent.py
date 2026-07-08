@@ -105,7 +105,12 @@ async def _ensure_conversation(
         return conv
     conv = Conversation(
         user_id=user_id,
-        title=(title_seed or "New conversation")[:120],
+        # Name a freshly-created conversation from the user's first
+        # query: first 100 chars, trimmed, falling back to the generic
+        # title only when the seed is empty. Matches the 100-char cap
+        # the chat UI applies in chatStore.startNew so both creation
+        # paths (UI pre-create and server-side fallback) agree.
+        title=((title_seed or "").strip()[:100] or "New conversation"),
     )
     session.add(conv)
     await session.flush()

@@ -18,9 +18,16 @@ from app.core.logging import get_logger
 log = get_logger(__name__)
 
 _BLOCKED_HOST_LITERALS = {
+    # The loopback hostnames are only blocked when ``allow_loopback``
+    # is False. With ``allow_loopback=True`` (the call site for
+    # self-hosted Ollama etc.) they fall through to the IP-resolve
+    # check below, which permits 127.0.0.0/8 and ::1.
     "localhost",
     "ip6-localhost",
-    "metadata.google.internal",  # GCP metadata
+    # Cloud metadata endpoints are NEVER loopback — they live on
+    # link-local addresses but use a memorable hostname on every
+    # major cloud. Block them regardless of ``allow_loopback``.
+    "metadata.google.internal",
 }
 
 # Cloud metadata hostnames whose resolution we always block regardless of IP.
@@ -98,7 +105,17 @@ def assert_safe_url(url: str, *, allow_loopback: bool = False) -> None:
         raise SSRFError("no host in url")
 
     if host in _BLOCKED_HOST_LITERALS:
-        raise SSRFError(f"blocked host: {host}")
+        # ``localhost`` / ``ip6-localhost`` are the canonical DNS
+        # names for the loopback block. We allow them through when
+        # ``allow_loopback=True`` (the call site for self-hosted
+        # Ollama etc.) so the DNS-name form is treated the same as
+        # the IP-literal form (127.0.0.1 / ::1), which is already
+        # permitted by the IP check below. Cloud-metadata hostnames
+        # are NOT loopback, so they stay blocked either way.
+        if allow_loopback and host in ("localhost", "ip6-localhost"):
+            pass  # fall through to the IP / resolve check
+        else:
+            raise SSRFError(f"blocked host: {host}")
     for pat in _BLOCKED_HOST_PATTERNS:
         if host == pat or host.endswith("." + pat):
             raise SSRFError(f"blocked host: {host}")
