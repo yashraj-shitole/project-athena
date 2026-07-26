@@ -29,7 +29,7 @@
 
 Every script in `scripts/` and at the repo root (when present) goes through
 the same docker-compose entry point as the existing test runner. The pattern
-mirrors `test.ps1` / `test.sh`:
+mirrors `scripts/test.ps1` / `scripts/test.sh`:
 
 ```bash
 # All hermetic suites
@@ -72,8 +72,8 @@ The default run (`pytest` from `testing/`) executes `smoke` only. Use
 The new tree is **additive** — nothing in `backend/tests/` or the existing
 runner breaks. The constraints it inherits from the codebase:
 
-- **No breaking changes.** The existing `backend/tests/`, `test.ps1`, and
-  `test.sh` keep working exactly as today.
+- **No breaking changes.** The existing `backend/tests/`, `scripts/test.ps1`, and
+  `scripts/test.sh` keep working exactly as today.
 - **Docker-first.** Tests run inside `api` and `web-dev` containers; no
   new top-level services.
 - **Hermetic by default.** Live Postgres/Redis/Ollama are gated behind
@@ -84,9 +84,9 @@ runner breaks. The constraints it inherits from the codebase:
 - **SSRF guard stays in the router**, not the adapter constructor (memory).
 - **Live SQLAlchemy is integration-only** (memory).
 - **All scripts dual-surface.** `*.ps1` (pwsh 7+) and `*.sh` (bash 4+),
-  dot-sourcing the existing `goThrough/_helpers.{ps1,sh}`.
+  dot-sourcing the existing `scripts/goThrough/_helpers.{ps1,sh}`.
 - **Use `Invoke-Compose` / `run_compose` for docker**, never bare
-  `docker compose` (false-passes have happened in `test.ps1` history from
+  `docker compose` (false-passes have happened in `scripts/test.ps1` history from
   this exact issue).
 
 ## Where do I add a new test?

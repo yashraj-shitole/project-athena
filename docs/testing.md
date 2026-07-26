@@ -37,7 +37,7 @@ pytest -m "e2e"                 # Playwright E2E (skipped if Playwright not inst
 pytest -m "integration" --run-integration  # multi-component
 ```
 
-Or use the runner scripts (mirrors `test.ps1` / `test.sh`):
+Or use the runner scripts (mirrors `scripts/test.ps1` / `scripts/test.sh`):
 
 ```bash
 ./scripts/run_smoke.sh
@@ -52,8 +52,8 @@ Or use the runner scripts (mirrors `test.ps1` / `test.sh`):
 ```
 
 The scripts use the same `Invoke-Compose` / `run_compose` helpers
-as `test.ps1` / `test.sh` — never bare `docker compose` (false-passes
-have happened in `test.ps1` history from this exact issue).
+as `scripts/test.ps1` / `scripts/test.sh` — never bare `docker compose` (false-passes
+have happened in `scripts/test.ps1` history from this exact issue).
 
 ## Pytest markers
 

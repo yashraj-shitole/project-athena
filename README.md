@@ -67,25 +67,28 @@ project-athena/
 │   ├── mocks/               httpx MockTransport handlers + stub LLM/ProviderAdapter
 │   ├── scripts/             run_smoke / run_evals / run_perf / run_security / run_all (.ps1 + .sh)
 │   └── ci/                  GitHub Actions workflows
+├── scripts/                Developer automation (cross-platform .ps1 + .sh)
+│   ├── build.ps1 / docker-up.ps1 / test.ps1 / debug-*.ps1 / clean / reset / logs / status / health
+│   └── goThrough/           _helpers + canonical implementations (single source of truth)
 └── docs/                    design and reference docs
 ```
 
 ## Developer scripts (one-command)
 
-The repo root and `goThrough/` contain a cross-platform automation layer that
-wraps Docker Compose with env validation, health waits, and colored output.
-Windows PowerShell 7+ is the primary interface; `build.sh` / `docker-up.sh`
-/ `test.sh` are the macOS/Linux equivalents.
+`scripts/` (entry points) and `scripts/goThrough/` (canonical implementations) hold a
+cross-platform automation layer that wraps Docker Compose with env validation, health
+waits, and colored output. Windows PowerShell 7+ is the primary interface;
+`scripts/build.sh` / `scripts/docker-up.sh` / `scripts/test.sh` are the macOS/Linux equivalents.
 
 ```powershell
-.\build.ps1                 # build all images (validates env, ensures network/volumes)
-.\docker-up.ps1             # run the stack            -> http://localhost:8080
-.\docker-up.ps1 -Debug      # hot reload + debugger    -> :8000 / :5678 / :5173
-.\docker-up.ps1 -Debug -Watch
-.\test.ps1                  # all tests (run inside containers)
-.\debug-all.ps1             # full stack in debug mode
-.\health.ps1                # verify services + DB + API endpoints
-.\reset.ps1 -Volumes        # wipe and start over
+.\scripts\build.ps1                 # build all images (validates env, ensures network/volumes)
+.\scripts\docker-up.ps1             # run the stack            -> http://localhost:8080
+.\scripts\docker-up.ps1 -Debug      # hot reload + debugger    -> :8000 / :5678 / :5173
+.\scripts\docker-up.ps1 -Debug -Watch
+.\scripts\test.ps1                  # all tests (run inside containers)
+.\scripts\debug-all.ps1             # full stack in debug mode
+.\scripts\health.ps1                # verify services + DB + API endpoints
+.\scripts\reset.ps1 -Volumes        # wipe and start over
 ```
 
 Service aliases: `backend`→`api`, `frontend`→`nginx` (prod) / `web-dev` (HMR),

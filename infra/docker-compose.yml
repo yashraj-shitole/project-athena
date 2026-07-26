@@ -26,8 +26,8 @@
 # To stop and wipe data:
 #   docker compose down -v
 #
-# Developer scripts (preferred): the repo-root build.ps1 / docker-up.ps1 /
-# test.ps1 / debug-all.ps1 and the goThrough/ suite wrap the commands below
+# Developer scripts (preferred): scripts/build.ps1 / scripts/docker-up.ps1 /
+# scripts/test.ps1 / scripts/debug-all.ps1 and the scripts/goThrough/ suite wrap the commands below
 # with env validation, health waits, and a consistent project name. They set
 # COMPOSE_PROJECT_NAME=athena; the explicit `name:` below keeps manual runs
 # consistent with scripted ones (volumes become athena_pgdata, etc.).
