@@ -136,12 +136,18 @@ class RunResult:
     total_ms: float
     stages: List[StageSample] = field(default_factory=list)
     error: str | None = None
+    # Sub-stage split of the "embedding" stage, populated from the
+    # `indexed` event payload (embed compute / keyword encode / DB COPY
+    # / progress flush). Lets the table show DB-bound vs encoder-bound.
+    sub_ms: dict = field(default_factory=dict)
 
 
 StatusCb = Callable[[str, dict], Awaitable[None]]
 
 
-def _make_status_cb(sink: List[StageSample]) -> StatusCb:
+def _make_status_cb(
+    sink: List[StageSample], sub_ms: dict | None = None
+) -> StatusCb:
     """Translate pipeline events into StageSample rows.
 
     The pipeline emits: "processing" → "extracted" → "chunked" →
@@ -152,10 +158,15 @@ def _make_status_cb(sink: List[StageSample]) -> StatusCb:
       chunking   = extracted→chunked
       embedding  = chunked→embedded    (includes every batch callback)
       indexing   = embedded→indexed
+
+    On the terminal `indexed` event we also copy the pipeline's sub-stage
+    split (`embed_ms`/`keyword_ms`/`copy_ms`/`flush_ms`) out of the
+    payload into `sub_ms` so the reporter can break the embedding stage
+    into DB-bound vs encoder-bound pieces.
     """
     seen: dict[str, float] = {}
 
-    async def cb(event: str, _payload: dict) -> None:
+    async def cb(event: str, payload: dict) -> None:
         now = time.perf_counter()
         if event == "processing":
             seen["processing"] = now
@@ -174,6 +185,10 @@ def _make_status_cb(sink: List[StageSample]) -> StatusCb:
             seen["indexed"] = now
             sink.append(StageSample("indexing", seen["embedded"], now))
             sink.append(StageSample("total", seen["processing"], now))
+            if sub_ms is not None:
+                for k in ("embed_ms", "keyword_ms", "copy_ms", "flush_ms"):
+                    if k in payload:
+                        sub_ms[k] = int(payload[k])
         elif event == "failed":
             seen["failed"] = now
             sink.append(StageSample("failed", seen["processing"], now))
@@ -209,7 +224,8 @@ async def _run_once(
     file_path.write_bytes(spec.body)
 
     samples: List[StageSample] = []
-    cb = _make_status_cb(samples)
+    sub_ms: dict = {}
+    cb = _make_status_cb(samples, sub_ms)
     error: str | None = None
     started = time.perf_counter()
     try:
@@ -262,6 +278,7 @@ async def _run_once(
         total_ms=(ended - started) * 1000.0,
         stages=samples,
         error=error,
+        sub_ms=sub_ms,
     )
     # Stash chunk_count on the result for the printer — dataclass is
     # closed by default; we attach it as an attribute.
@@ -287,6 +304,9 @@ def _format_table(results: Sequence[RunResult]) -> str:
         "extracting",
         "chunking",
         "embedding",
+        "embed",
+        "keyword",
+        "copy",
         "indexing",
         "total",
         "runs",
@@ -306,6 +326,10 @@ def _format_table(results: Sequence[RunResult]) -> str:
                 for s in r.stages
                 if s.name == stage_name
             ]
+            return statistics.median(vals) if vals else float("nan")
+
+        def _med_sub(key: str) -> float:
+            vals = [r.sub_ms[key] for r in non_warmup if key in r.sub_ms]
             return statistics.median(vals) if vals else float("nan")
 
         spec = _input_for_label(label)
@@ -331,6 +355,9 @@ def _format_table(results: Sequence[RunResult]) -> str:
                     f"{_med('extracting'):.0f}",
                     f"{_med('chunking'):.0f}",
                     f"{_med('embedding'):.0f}",
+                    f"{_med_sub('embed_ms'):.0f}",
+                    f"{_med_sub('keyword_ms'):.0f}",
+                    f"{_med_sub('copy_ms'):.0f}",
                     f"{_med('indexing'):.0f}",
                     total_med,
                     f"{len(non_warmup)} (+{len(warmup)}w)",
@@ -451,7 +478,8 @@ async def main() -> int:
                         f"    ok: total={res.total_ms:.0f}ms  "
                         f"chunks={cc:,}  "
                         f"stages="
-                        f"{[(s.name, f'{s.ms:.0f}') for s in res.stages]}"
+                        f"{[(s.name, f'{s.ms:.0f}') for s in res.stages]}  "
+                        f"sub={ {k: f'{v}ms' for k, v in res.sub_ms.items()} }"
                     )
                 all_results.append(res)
     finally:

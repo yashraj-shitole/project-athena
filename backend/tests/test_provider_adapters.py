@@ -590,7 +590,11 @@ async def test_custom_chat_normalizes_tool_call_from_paths():
 
 
 @pytest.mark.asyncio
-async def test_custom_stream_returns_unsupported_error():
+async def test_custom_stream_falls_back_to_chunked_chat():
+    # The custom adapter can't parse a generic SSE stream, so stream()
+    # falls back to a non-streaming chat() and emits the text in
+    # chunks followed by a terminal done event (instead of the old
+    # hard "unsupported" error).
     template = {"messages": "{{messages}}"}
     response_paths = {"text": "text"}
 
@@ -601,10 +605,10 @@ async def test_custom_stream_returns_unsupported_error():
     events = []
     async for ev in p.stream(base.ChatRequest(messages=[{"role": "user", "content": "x"}])):
         events.append(ev)
-    assert len(events) == 1
-    assert events[0]["done"] is True
-    assert "error" in events[0]
-    assert "stream" in events[0]["error"].lower()
+    # At least one content delta + a terminal done; no error.
+    assert events[-1]["done"] is True
+    assert "error" not in events[-1]
+    assert "".join(ev.get("delta", "") for ev in events) == "x"
     await p.aclose()
 
 

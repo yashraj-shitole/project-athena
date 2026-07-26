@@ -42,6 +42,7 @@ from app.services.providers.base import (
     CAT_RATE_LIMIT,
     CAT_SERVER,
     CAT_TIMEOUT,
+    CAT_UNKNOWN,
     CAT_UNSUPPORTED,
     ChatRequest,
     HealthReport,
@@ -75,22 +76,26 @@ def _categorize_http(status: int) -> str:
 
 
 def _split_system(messages: list[dict]) -> tuple[Optional[str], list[dict]]:
-    """Pop the first `role == "system"` message out as `system`.
+    """Pull every `role == "system"` message out and merge into `system`.
 
-    Anthropic takes the system prompt as a top-level string. The
-    orchestrator may also pass a system message via `options` —
-    the OpenAI-compat adapter already handles that path; here we
-    only translate the messages list.
+    Anthropic takes the system prompt as a top-level string; `role:
+    "system"` entries inside `messages` are rejected ("roles must be
+    one of ['user', 'assistant']"). The earlier version only captured
+    the *first* system message and let any subsequent ones fall through
+    into `messages`, which 400'd whenever the orchestrator appended a
+    corrective system note (e.g. the FR-23 retry note). We now collect
+    all of them and join with a blank line.
     """
     out: list[dict] = []
-    system: Optional[str] = None
+    system_parts: list[str] = []
     for m in messages:
-        if m.get("role") == "system" and system is None:
+        if m.get("role") == "system":
             content = m.get("content")
-            if isinstance(content, str):
-                system = content
+            if isinstance(content, str) and content:
+                system_parts.append(content)
             continue
         out.append(m)
+    system = "\n\n".join(system_parts) if system_parts else None
     return system, out
 
 
@@ -130,6 +135,12 @@ def _options_to_payload(options: Optional[dict]) -> dict[str, Any]:
     recommended; if both are set the upstream rejects. We pass them
     through verbatim and let the user (or the orchestrator's defaults)
     decide which to use.
+
+    Cross-vendor aliases: the OpenAI `stop` key maps to Anthropic's
+    `stop_sequences`, and the Ollama `num_predict` key (which the shared
+    orchestrator `_build_options` sets for the answer cap) maps to
+    Anthropic's required `max_tokens`. Without these the orchestrator's
+    stop list and answer cap were silently dropped for Anthropic.
     """
     if not options:
         return {}
@@ -144,6 +155,20 @@ def _options_to_payload(options: Optional[dict]) -> dict[str, Any]:
     for k, v in options.items():
         if k in direct:
             out[k] = v
+        elif k == "stop":
+            # OpenAI -> Anthropic alias. `stop` may be a string or list.
+            if isinstance(v, (list, tuple)):
+                out["stop_sequences"] = list(v)
+            elif v:
+                out["stop_sequences"] = [str(v)]
+    # `num_predict` (Ollama) -> `max_tokens` (Anthropic). Handled here
+    # so chat()/stream() don't each need to repeat the alias; the
+    # explicit `max_tokens` from the user (below) still wins.
+    if "max_tokens" not in out and "num_predict" in options:
+        try:
+            out["max_tokens"] = int(options["num_predict"])
+        except (TypeError, ValueError):
+            pass
     return out
 
 
@@ -271,11 +296,12 @@ class AnthropicProvider(ProviderAdapter):
             tools = _tools_anthropic(req.tools)
             if tools:
                 payload["tools"] = tools
-        # Honor an explicit `max_tokens` from the orchestrator.
+        # Apply translated options (incl. the num_predict -> max_tokens
+        # alias), then let an explicit `max_tokens` override it.
         opts = _options_to_payload(req.options)
+        payload.update(opts)
         if "max_tokens" in (req.options or {}):
             payload["max_tokens"] = int(req.options["max_tokens"])
-        payload.update(opts)
 
         try:
             r = await self._client.post(
@@ -338,11 +364,18 @@ class AnthropicProvider(ProviderAdapter):
             if tools:
                 payload["tools"] = tools
         opts = _options_to_payload(req.options)
+        payload.update(opts)
         if "max_tokens" in (req.options or {}):
             payload["max_tokens"] = int(req.options["max_tokens"])
-        payload.update(opts)
 
         try:
+            emitted_done = False
+            # Accumulate the first tool_use block: Anthropic streams it
+            # as content_block_start ({type: tool_use, name, id}) then a
+            # series of input_json_delta events whose partial_json
+            # fragments concatenate into the arguments JSON string.
+            tool_name: Optional[str] = None
+            tool_args_json = ""
             async with self._client.stream(
                 "POST", "/v1/messages", json=payload, headers=self._headers()
             ) as r:
@@ -373,17 +406,48 @@ class AnthropicProvider(ProviderAdapter):
                         ev = json.loads(line)
                     except json.JSONDecodeError:
                         continue
-                    if event_type == "content_block_delta":
-                        delta = (ev.get("delta") or {})
-                        if delta.get("type") == "text_delta":
+                    if event_type == "content_block_start":
+                        block = ev.get("content_block") or {}
+                        if block.get("type") == "tool_use" and tool_name is None:
+                            tool_name = block.get("name") or ""
+                            tool_args_json = ""
+                    elif event_type == "content_block_delta":
+                        delta = ev.get("delta") or {}
+                        dtype = delta.get("type")
+                        if dtype == "text_delta":
                             yield {"delta": delta.get("text") or "", "done": False}
+                        elif dtype == "input_json_delta":
+                            tool_args_json += delta.get("partial_json") or ""
                     elif event_type == "message_stop":
-                        yield {"delta": "", "done": True}
+                        emitted_done = True
+                        ev_done: dict[str, Any] = {"delta": "", "done": True}
+                        if tool_name is not None:
+                            args: Any = {}
+                            if tool_args_json:
+                                try:
+                                    args = json.loads(tool_args_json)
+                                except json.JSONDecodeError:
+                                    args = {"_raw": tool_args_json}
+                            ev_done["tool_call"] = {"name": tool_name, "arguments": args}
+                        yield ev_done
                         return
                     elif event_type == "error":
                         msg = (ev.get("error") or {}).get("message") or "anthropic error"
                         yield {"delta": "", "done": True, "error": msg}
                         return
+            # Stream closed without a `message_stop` event — emit a
+            # terminal done so the SSE consumer finalizes.
+            if not emitted_done:
+                ev_done = {"delta": "", "done": True}
+                if tool_name is not None:
+                    args: Any = {}
+                    if tool_args_json:
+                        try:
+                            args = json.loads(tool_args_json)
+                        except json.JSONDecodeError:
+                            args = {"_raw": tool_args_json}
+                    ev_done["tool_call"] = {"name": tool_name, "arguments": args}
+                yield ev_done
         except httpx.TimeoutException as exc:
             yield {"delta": "", "done": True, "error": f"stream timeout: {exc}"}
         except httpx.HTTPError as exc:

@@ -90,12 +90,26 @@ class Settings(BaseSettings):
     ollama_timeout: float = 60.0
 
     # ---- Token budget (NFR-17) ----
-    token_budget: int = 3000
+    # The total prompt budget the prompter assembles towards. The Phase-1
+    # default of 3000 was sized for a tiny local model on constrained
+    # hardware; every configured external vendor model (and the built-in
+    # qwen2.5:1.5b-instruct, 32K context) comfortably handles a larger
+    # window, so we default to 8000. This lets retrieval surface more
+    # chunks and keeps conversation history from being clipped too hard,
+    # both of which directly improve answer accuracy.
+    token_budget: int = 8000
     system_prompt_reserve: int = 350
     tool_def_reserve: int = 600
-    history_reserve: int = 800
-    chunk_reserve: int = 1000
-    answer_reserve: int = 250
+    history_reserve: int = 1200
+    chunk_reserve: int = 2500
+    # The 250-token answer cap truncated longer answers mid-sentence.
+    # 768 leaves room for a full cited answer without letting a runaway
+    # generation fill the whole context window.
+    answer_reserve: int = 768
+    # Real model context window used to set Ollama's `num_ctx`. Decoupled
+    # from `token_budget` (the *prompt* budget) so a larger retrieval
+    # window doesn't require touching the model's context cap.
+    model_context_tokens: int = 32768
 
     # ---- Storage ----
     storage_dir: Path = Path("./storage")
@@ -115,16 +129,51 @@ class Settings(BaseSettings):
     embedding_model_name: str = "sentence-transformers/all-MiniLM-L6-v2"
     keyword_min_sim: float = 0.15  # cosine threshold for keyword on-topic filter
     # Size of the per-batch embed + keyword-encoder + COPY window.
-    # 32 chunks × ~300 tokens ≈ 9.6k tokens per encoder forward
-    # pass — well within the all-MiniLM-L6-v2 sweet spot. Larger
-    # batches trade memory for fewer per-batch overheads; the perf
-    # script overrides this.
-    ingest_embed_batch_size: int = 32
+    # 64 chunks × ~300 tokens ≈ 19k tokens per encoder forward pass —
+    # well within the all-MiniLM-L6-v2 sweet spot, and a bigger batch
+    # amortizes per-batch overheads (Python, torch kernel launch)
+    # better than the old 32. Memory impact is bounded by the sliding
+    # window (`ingest_embed_workers × ingest_embed_batch_size` chunks
+    # in flight), which stays small. Larger batches trade a slightly
+    # coarser progress bar for higher throughput.
+    ingest_embed_batch_size: int = 64
+    # Number of embedding forward-passes to run concurrently during
+    # ingestion. The MiniLM encoder releases the GIL during the torch
+    # matmul, so fanning N batches across N worker threads gives a
+    # near-linear speedup up to core count — this is the single biggest
+    # ingestion win on CPU (embedding is ~99% of wall-clock on large
+    # docs). Keyword-encode + COPY stay sequential (they're <1% and not
+    # safe to run concurrently on one DB connection). 0 = auto
+    # (min(8, cpu_count)). When >1, torch intra-op threads are capped
+    # to cpu//workers so workers×threads ≈ cpu_count (no
+    # oversubscription). Set to 1 to preserve the old sequential path.
+    ingest_embed_workers: int = 0
+    # HNSW bulk-load tuning for the ingestion transaction. Set
+    # transaction-local (SET LOCAL) before the per-batch COPY loop so
+    # HNSW index maintenance — the dominant per-row DB cost on chunk
+    # writes — runs faster while the load is in flight, then resets at
+    # the pipeline's commit so retrieval `ef_search` and other requests
+    # are untouched. `ingest_hnsw_ef_insert` lowers the insert-time
+    # graph search depth (pgvector default 40); 10 is the standard
+    # bulk-load value — insert is ~2-4x faster, recall is governed
+    # separately by `hnsw.ef_search` (left at its default). 0 = skip
+    # (use server default). `ingest_maintenance_work_mem` raises the
+    # per-transaction memory cap HNSW build uses (Postgres default is
+    # typically 64MB). Empty = skip. Non-Postgres dialects ignore both.
+    ingest_hnsw_ef_insert: int = 10
+    ingest_maintenance_work_mem: str = "256MB"
 
     # ---- Retrieval ----
-    retrieval_top_k: int = 4
+    retrieval_top_k: int = 6
     retrieval_hybrid_threshold: float = 0.05  # below this, also run vector
     retrieval_always_hybrid: bool = False  # FR-21: when True, always RRF lexical+vector
+    # Minimum cosine similarity (1 - pgvector cosine distance) for a
+    # vector hit to be kept. MiniLM-L6 embeddings of unrelated text sit
+    # well below 0.2; dropping them prevents semantically-irrelevant
+    # chunks from polluting the prompt (and triggering "I don't know" or
+    # hallucination). Only applied to vector hits — lexical ts_rank_cd
+    # and RRF-fused scores are on different scales and are not filtered.
+    retrieval_vector_min_sim: float = 0.2
 
     # ---- Cache namespaces ----
     cache_prefix_retrieval: str = "search"
@@ -386,6 +435,10 @@ class Settings(BaseSettings):
         return self.answer_reserve
 
     @property
+    def MODEL_CONTEXT_TOKENS(self) -> int:
+        return self.model_context_tokens
+
+    @property
     def CHUNK_TARGET_TOKENS(self) -> int:
         return self.chunk_size_tokens
 
@@ -406,6 +459,18 @@ class Settings(BaseSettings):
         return self.ingest_embed_batch_size
 
     @property
+    def INGEST_EMBED_WORKERS(self) -> int:
+        return self.ingest_embed_workers
+
+    @property
+    def INGEST_HNSW_EF_INSERT(self) -> int:
+        return self.ingest_hnsw_ef_insert
+
+    @property
+    def INGEST_MAINTENANCE_WORK_MEM(self) -> str:
+        return self.ingest_maintenance_work_mem
+
+    @property
     def RETRIEVAL_TOP_K(self) -> int:
         return self.retrieval_top_k
 
@@ -416,6 +481,10 @@ class Settings(BaseSettings):
     @property
     def RETRIEVAL_ALWAYS_HYBRID(self) -> bool:
         return self.retrieval_always_hybrid
+
+    @property
+    def RETRIEVAL_VECTOR_MIN_SIM(self) -> float:
+        return self.retrieval_vector_min_sim
 
     @property
     def UPLOAD_MAX_BYTES(self) -> int:

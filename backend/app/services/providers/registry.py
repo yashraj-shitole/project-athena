@@ -6,9 +6,17 @@ class here. Nothing else needs to change.
 """
 from __future__ import annotations
 
+import logging
 from typing import Callable, Type
 
 from app.services.providers.base import ProviderAdapter
+
+# Module logger MUST be created before the try/except register blocks
+# below — each `except` handler logs a register_failed event, and an
+# earlier version defined `log` *after* those blocks, so any adapter
+# import failure raised NameError inside the handler and took the whole
+# registry (and therefore the app) down.
+log = logging.getLogger(__name__)
 
 # Populated below by the import-then-register dance; the OpenAI-compat
 # adapter is always present. The other adapters are added in later
@@ -85,11 +93,6 @@ try:
     register("custom", CustomProvider)
 except Exception as exc:  # pragma: no cover
     log.warning("provider.register_failed", provider="custom", error=str(exc))
-
-# Late import so the log helper is in scope above.
-import logging as _logging  # noqa: E402
-
-log = _logging.getLogger(__name__)
 
 
 __all__ = ["all_providers", "get", "register"]

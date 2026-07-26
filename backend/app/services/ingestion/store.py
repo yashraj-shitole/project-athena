@@ -40,7 +40,7 @@ import uuid
 from datetime import datetime
 from typing import Any, List, Sequence, Tuple
 
-from sqlalchemy import delete
+from sqlalchemy import delete, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.cache import invalidate_user
@@ -66,6 +66,55 @@ async def delete_existing_chunks(
             DocumentChunk.user_id == user_id,
         )
     )
+
+
+async def set_ingest_bulk_load_gucs(session: AsyncSession) -> None:
+    """Set transaction-local GUCs that speed up HNSW bulk-load during
+    the per-batch chunk COPY.
+
+    - ``hnsw.ef_insert`` lowered (default 40 → 10): insert-time graph
+      search depth. ~2-4x faster HNSW inserts; search recall is governed
+      separately by ``hnsw.ef_search`` (left at its default), so this
+      is a pure insert-side win.
+    - ``maintenance_work_mem`` raised (typically 64MB → 256MB): HNSW
+      graph build is memory-hungry.
+
+    Uses ``set_config(..., true)`` (``SET LOCAL``) so the values bind to
+    the pipeline's current transaction and reset at its commit — no leak
+    onto the pooled connection, retrieval and other requests unaffected.
+
+    No-op on non-Postgres dialects (the SQLite unit suite can't speak
+    asyncpg COPY and doesn't have HNSW) and when the configured value is
+    ``0`` / empty (use the server default). Caller must invoke this
+    *inside* the ingestion transaction (the pipeline does, before the
+    COPY loop).
+
+    Defensive about the bind: the unit suite drives the pipeline with a
+    stub session that has no ``get_bind`` (it patches ``copy_chunks``
+    for the same reason). We treat "can't confirm Postgres" as a no-op
+    rather than crashing the whole ingest.
+    """
+    get_bind = getattr(session, "get_bind", None)
+    if get_bind is None:
+        return
+    try:
+        dialect = get_bind().dialect.name
+    except Exception:  # noqa: BLE001
+        return
+    if dialect != "postgresql":
+        return
+    ef_insert = settings.INGEST_HNSW_EF_INSERT
+    if ef_insert and ef_insert > 0:
+        await session.execute(
+            text("SELECT set_config('hnsw.ef_insert', :value, true)"),
+            {"value": str(int(ef_insert))},
+        )
+    work_mem = (settings.INGEST_MAINTENANCE_WORK_MEM or "").strip()
+    if work_mem:
+        await session.execute(
+            text("SELECT set_config('maintenance_work_mem', :value, true)"),
+            {"value": work_mem},
+        )
 
 
 def _format_vector(vec: Sequence[float]) -> str:

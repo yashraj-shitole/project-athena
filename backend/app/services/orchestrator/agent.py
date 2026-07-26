@@ -367,14 +367,18 @@ async def run_turn(
     tool_schemas = await tool_registry.select_subset(session, requested=tool_subset)
 
     # 3. Decide whether to retrieve up-front (cheap heuristic — also
-    # lets the LLM skip the tool call when not needed).
+    # lets the LLM skip the tool call when not needed). Pass the raw
+    # user message as `query` so the vector embedding captures the
+    # natural-language intent; the keyword bag is still used for the
+    # lexical tsquery.
     initial_chunks: list[dict] = []
     initial_keywords = fallback_keywords(message, top_k=6)
-    if initial_keywords:
+    if initial_keywords or message.strip():
         initial_chunks = await retrieval_search.retrieve(
             session=session,
             user_id=user_id,
             keywords=initial_keywords,
+            query=message,
             top_k=4,
         )
 
@@ -639,9 +643,13 @@ async def stream_turn(
 
         initial_chunks: list[dict] = []
         kws = fallback_keywords(message, top_k=6)
-        if kws:
+        if kws or message.strip():
             initial_chunks = await retrieval_search.retrieve(
-                session=session, user_id=user_id, keywords=kws, top_k=4
+                session=session,
+                user_id=user_id,
+                keywords=kws,
+                query=message,
+                top_k=4,
             )
 
         built = build_prompt(
@@ -691,8 +699,20 @@ async def stream_turn(
                 fresh = _chunks_from_tool_result(result)
                 if fresh:
                     final_chunks = fresh
-                # Re-build prompt with the tool result appended.
-                built.messages = built.messages + [
+                # Re-build the prompt with the refreshed chunks (mirrors
+                # run_turn at the build_prompt(... final_chunks ...) call).
+                # The previous code appended the raw tool-result JSON to
+                # the *initial* prompt, so the streamed answer was
+                # generated from the up-front chunks while citations were
+                # extracted from `final_chunks` — the non-streaming and
+                # streaming paths disagreed on what context the model saw.
+                built2 = build_prompt(
+                    query=message,
+                    chunks=final_chunks,
+                    history=history,
+                    tools=tool_schemas,
+                )
+                built2.messages = built2.messages + [
                     {
                         "role": "tool",
                         "name": tc_name,
@@ -702,7 +722,7 @@ async def stream_turn(
                 # Stream the final answer under a single message id.
                 yield sse.text_message_start(msg_id)
                 chunks_seen: list[str] = []
-                async for ev in llm.stream(messages=built.messages, tools=built.tools):
+                async for ev in llm.stream(messages=built2.messages, tools=built2.tools):
                     delta = ev.get("delta") or ""
                     if delta:
                         chunks_seen.append(delta)

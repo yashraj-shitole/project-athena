@@ -43,11 +43,16 @@ import httpx
 
 from app.core.logging import get_logger
 from app.services.providers.base import (
+    CAT_AUTH,
     CAT_BAD_REQUEST,
     CAT_INVALID_RESPONSE,
     CAT_NETWORK,
+    CAT_NOT_FOUND,
     CAT_OK,
+    CAT_RATE_LIMIT,
+    CAT_SERVER,
     CAT_TIMEOUT,
+    CAT_UNKNOWN,
     ChatRequest,
     HealthReport,
     LLMResponse,
@@ -123,15 +128,32 @@ def _lookup_path(obj: Any, path: str) -> Any:
 
 def _split_system(messages: list[dict]) -> tuple[Optional[str], list[dict]]:
     out: list[dict] = []
-    system: Optional[str] = None
+    system_parts: list[str] = []
     for m in messages:
-        if m.get("role") == "system" and system is None:
+        if m.get("role") == "system":
             content = m.get("content")
-            if isinstance(content, str):
-                system = content
+            if isinstance(content, str) and content:
+                system_parts.append(content)
             continue
         out.append(m)
+    system = "\n\n".join(system_parts) if system_parts else None
     return system, out
+
+
+def _categorize_http(status: int) -> str:
+    if status in (200, 201):
+        return CAT_OK
+    if status in (401, 403):
+        return CAT_AUTH
+    if status == 404:
+        return CAT_NOT_FOUND
+    if status == 429:
+        return CAT_RATE_LIMIT
+    if 400 <= status < 500:
+        return CAT_BAD_REQUEST
+    if status >= 500:
+        return CAT_SERVER
+    return CAT_UNKNOWN
 
 
 class CustomProvider(ProviderAdapter):
@@ -183,12 +205,17 @@ class CustomProvider(ProviderAdapter):
                 category=CAT_BAD_REQUEST,
                 provider=self.name,
             )
-        # Strip the template keys from `custom_headers` so they don't
-        # leak into the request headers.
+        # Optional request path for endpoints that aren't at the base
+        # URL root (e.g. `/v1/chat`). Pulled out of `custom_headers`
+        # under the `__path__` key so it doesn't leak as a literal
+        # `__path__:` header on the outgoing request.
+        self._path: str = str((self.custom_headers or {}).get("__path__") or "")
+        # Strip the template/config keys from `custom_headers` so they
+        # don't leak into the request headers.
         self.custom_headers = {
             k: v
             for k, v in (self.custom_headers or {}).items()
-            if k not in ("request_template", "response_paths")
+            if k not in ("request_template", "response_paths", "__path__")
         }
         self._client = httpx.AsyncClient(
             base_url=self.base_url,
@@ -219,13 +246,23 @@ class CustomProvider(ProviderAdapter):
 
     def _build_body(self, req: ChatRequest) -> dict[str, Any]:
         system, msgs = _split_system(list(req.messages))
+        opts = req.options or {}
         ctx = {
             "model": self._resolve_model(req),
             "messages": msgs,
             "messages_json": json.dumps(msgs),
             "system": system or "",
             "tools": list(req.tools or []),
+            "tools_json": json.dumps(list(req.tools or [])),
+            "options": opts,
+            "options_json": json.dumps(opts),
         }
+        # Expose each option key directly (e.g. `{{temperature}}`,
+        # `{{max_tokens}}`) so templates can place them without going
+        # through `{{options}}`. Base ctx keys win on collision so an
+        # option named `model` can't clobber the resolved model.
+        for k, v in opts.items():
+            ctx.setdefault(k, v)
         rendered = _render_template(self._request_template, ctx)
         if not isinstance(rendered, dict):
             raise ProviderError(
@@ -283,13 +320,13 @@ class CustomProvider(ProviderAdapter):
                 category=CAT_BAD_REQUEST,
             )
         body = self._build_body(req)
-        # Custom providers don't have a standard chat path; we POST
-        # to the base URL. Users who need a path can put a full URL
-        # in `base_url` (the route is `/v1/chat` etc.).
-        path = self.custom_headers.get("__path__", "")
+        # Custom providers don't have a standard chat path; we POST to
+        # `self._path` (defaults to the base URL root). Users who need
+        # a path set `__path__` in the connector's settings.
+        path = self._path or "/"
         try:
             r = await self._client.post(
-                path or "/", json=body, headers=self._headers()
+                path, json=body, headers=self._headers()
             )
         except httpx.TimeoutException as exc:
             raise ProviderError(
@@ -304,9 +341,13 @@ class CustomProvider(ProviderAdapter):
                 provider=self.name,
             ) from exc
         if r.status_code != 200:
+            # Categorize by HTTP status so the dashboard / circuit
+            # breaker can distinguish auth vs rate-limit vs server
+            # failures (the previous code lumped everything into
+            # CAT_INVALID_RESPONSE).
             raise ProviderError(
                 f"custom chat failed ({r.status_code}): {(r.text or '')[:300]}",
-                category=CAT_INVALID_RESPONSE,
+                category=_categorize_http(r.status_code),
                 status_code=r.status_code,
                 provider=self.name,
             )
@@ -323,14 +364,23 @@ class CustomProvider(ProviderAdapter):
         return resp
 
     async def stream(self, req: ChatRequest) -> AsyncIterator[dict[str, Any]]:
-        # Streaming is a non-trivial extension for the custom
-        # provider — the response shape varies wildly per user
-        # template. For now, the custom adapter is non-streaming;
-        # callers fall back to non-streaming chat if they pick
-        # `custom`. The orchestrator's `LLMClient.stream` will get
-        # the full text in a single event.
-        yield {"delta": "", "done": True, "error": "custom provider does not support streaming"}
-        return
+        # The custom provider's response shape is user-defined, so we
+        # can't parse a generic SSE stream. Fall back to a non-streaming
+        # `chat()` call and emit the full text in chunks — the
+        # orchestrator's SSE consumer sees a normal START / CONTENT /
+        # END sequence instead of a hard "not supported" error.
+        try:
+            resp = await self.chat(req)
+        except ProviderError as exc:
+            yield {"delta": "", "done": True, "error": str(exc)}
+            return
+        text = resp.text or ""
+        for i in range(0, len(text), 32):
+            yield {"delta": text[i : i + 32], "done": False}
+        ev_done: dict[str, Any] = {"delta": "", "done": True}
+        if resp.tool_call:
+            ev_done["tool_call"] = resp.tool_call
+        yield ev_done
 
     async def list_models(self) -> list[str]:
         return list(self.models)
@@ -360,13 +410,20 @@ class CustomProvider(ProviderAdapter):
             # 401/403/404 are still "the server is up" — the auth /
             # path is wrong, but the host is reachable.
             ok = r.status_code in (200, 201, 204)
-            status = "online" if ok else (
-                "auth_failed" if r.status_code in (401, 403) else "not_found"
-            )
+            if ok:
+                # Only an OK probe can be "slow" — a 401 that took a
+                # while is still "auth_failed", not "slow". The
+                # previous code inverted this (reported "slow" for
+                # low-latency non-OK responses).
+                status = "online" if latency_ms < 3000 else "slow"
+            else:
+                status = (
+                    "auth_failed" if r.status_code in (401, 403) else "not_found"
+                )
             return HealthReport(
                 ok=ok,
                 latency_ms=latency_ms,
-                status=status if ok else ("slow" if latency_ms < 3000 else status),
+                status=status,
                 capabilities={"chat": ok, "stream": ok, "tools": ok} if ok else {},
                 status_code=r.status_code,
             )

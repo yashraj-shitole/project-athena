@@ -38,10 +38,14 @@ events so the API closure can persist it without re-deriving it.
 Streaming design
 ----------------
 The chunker is a generator; the pipeline drives it in fixed-size
-batches. For each batch we:
+batches. Embedding is the dominant cost (~99% of wall-clock on large
+docs), and the MiniLM encoder releases the GIL during the torch
+matmul, so we fan `ingest_embed_workers` batch forward-passes across
+worker threads (sliding window of in-flight embed tasks). For each
+batch, in order, we then:
 
-  1. Embed the chunk texts via `encode_batched` (already off the
-     event loop via `asyncio.to_thread` internally).
+  1. Await that batch's embedding (it has been running in a thread
+     since it entered the window, possibly already done).
   2. Collect every chunk's candidate keyword phrases.
   3. Encode *all* candidates in a single `encode()` call (off the
      event loop). This collapses N forward passes into 1 — a 5–10×
@@ -49,16 +53,23 @@ batches. For each batch we:
      ingestion.
   4. Slice the resulting matrix back per-chunk and run
      `select_keywords` (pure CPU).
-  5. `copy_chunks` (asyncpg binary COPY on Postgres; ORM fallback
+  5. `copy_chunks` (asyncpg text COPY on Postgres; ORM fallback
      otherwise) for this batch. The transaction spans the whole
      pipeline, so all batches share one commit at the end.
 
-Peak memory is bounded by ``batch_size × text + batch_size ×
-candidate_phrase_length`` — not the full document.
+Keyword-encode + COPY stay strictly sequential — they're <1% of the
+cost and not safe to run concurrently on the single shared DB
+connection. The next batch's embed is scheduled before step 2 so its
+matmul overlaps with this batch's keyword-encode + COPY.
+
+Peak memory is bounded by ``workers × batch_size × text`` — not the
+full document.
 """
 from __future__ import annotations
 
 import asyncio
+import time
+from collections import deque
 from datetime import datetime, timezone
 from itertools import islice
 from pathlib import Path
@@ -70,7 +81,12 @@ from app.core.config import settings
 from app.core.database import set_rls_user
 from app.core.logging import get_logger
 from app.models.document import Document
-from app.services.embedding import encode, encode_batched
+from app.services.embedding import (
+    _encode_one_batch,
+    encode,
+    resolve_embed_workers,
+    tune_torch_threads_for_workers,
+)
 from app.services.ingestion.extractors import extract as extract_text
 from app.services.ingestion import chunker, store
 from app.services.ingestion.keywords import (
@@ -88,18 +104,6 @@ async def _noop_status(_status: str, _payload: dict) -> None:
 
 
 _DEFAULT_EMBED_BATCH = 32
-
-
-def _sync_batched(items, size: int):
-    """Synchronous batched(): group an iterable into lists of up to
-    `size` items. Used when we have a sync generator from
-    `chunker.iter_chunks`."""
-    it = iter(items)
-    while True:
-        chunk = list(islice(it, size))
-        if not chunk:
-            return
-        yield chunk
 
 
 async def ingest_document(
@@ -138,11 +142,21 @@ async def ingest_document(
             stage_progress={"extracting": 0},
         )
 
+        # Per-stage wall-clock (monotonic). Logged on the terminal
+        # `indexed` event so operators can see where time goes in the
+        # live app — not just via the perf bench. Stages match the
+        # bench's derivation: extracting = processing→extracted,
+        # chunking = extracted→chunked, embedding = chunked→embedded
+        # (the whole embed+keyword+COPY loop), indexing = embedded→
+        # indexed (the final commit).
+        _t0 = time.monotonic()
+
         # 1. Extract — wrap the synchronous parser in `to_thread`
         # so the chat SSE loop stays responsive while a 25MB PDF
         # is being parsed. The `ExtractionResult` (text + tables)
         # is small enough to pass between threads by reference.
         result = await asyncio.to_thread(extract_text, file_path)
+        _t_extract = time.monotonic()
         page_count = result.meta.get("pages") if result.mode == "prose" else None
 
         await cb(
@@ -168,6 +182,7 @@ async def ingest_document(
         # it adds <100ms over the streaming loop's total cost.
         chunk_iter = chunker.iter_chunks(result)
         chunk_count = sum(1 for _ in chunk_iter)
+        _t_chunk = time.monotonic()
         if chunk_count == 0:
             raise ValueError("No extractable text found in document")
 
@@ -206,12 +221,99 @@ async def ingest_document(
         # fire on the PG fast path).
         await set_rls_user(session, user_id)
         await store.delete_existing_chunks(session, document_id, user_id)
+        # Tune HNSW bulk-load for this transaction (SET LOCAL — resets
+        # at the final commit). Lower ef_insert + a bigger
+        # maintenance_work_mem make the per-batch COPY's HNSW index
+        # maintenance cheaper; retrieval ef_search is untouched. No-op
+        # on SQLite.
+        await store.set_ingest_bulk_load_gucs(session)
 
-        for batch_chunks in _sync_batched(chunk_iter, batch_size):
+        # --- Parallel embedding, sequential keyword-encode + COPY -------
+        # Embedding is ~99% of ingestion wall-clock and the MiniLM
+        # encoder releases the GIL during the torch matmul, so we fan
+        # `workers` batch forward-passes across worker threads for a
+        # near-linear speedup up to core count. Keyword-encode + COPY
+        # stay strictly sequential: they're <1% of the cost and not
+        # safe to run concurrently on the single shared DB connection.
+        #
+        # We keep a sliding window of at most `workers` in-flight embed
+        # tasks (deque of (chunks, texts, asyncio.Task)). Each turn:
+        # pop the oldest, report progress, await its vector (it has
+        # been running in a thread while we processed the previous
+        # batch's keywords + COPY), then schedule the next batch's
+        # embed to refill the window. Peak memory stays bounded at
+        # `workers × batch_size` chunks — not the whole document.
+        workers = resolve_embed_workers()
+        tune_torch_threads_for_workers(workers)
+
+        async def _schedule_embed(
+            batch_chunks: list,
+        ) -> tuple[list, list[str], "asyncio.Task"]:
+            texts = [c.content for c in batch_chunks]
+            task = asyncio.create_task(
+                asyncio.to_thread(_encode_one_batch, texts, True)
+            )
+            return batch_chunks, texts, task
+
+        chunk_seq = iter(chunk_iter)
+        window: deque = deque()
+        # Prime the window with up to `workers` batches.
+        for _ in range(workers):
+            nxt = list(islice(chunk_seq, batch_size))
+            if not nxt:
+                break
+            window.append(await _schedule_embed(nxt))
+
+        # Accumulators for the DB-side cost, logged on completion so
+        # we can tell compute-bound from DB-bound ingestion:
+        #   copy_ms_total        — asyncpg COPY of chunk rows (includes
+        #     tsvector generation + HNSW/GIN index maintenance).
+        #   flush_ms_total       — UPDATE of the documents progress row.
+        #   embed_compute_ms_total — time awaiting chunk-vector embed
+        #     tasks (pure encoder forward-passes; GIL-released matmul).
+        #   keyword_ms_total     — keyword candidate encode + MMR select
+        #     (the encoder cost added by keyword extraction).
+        copy_ms_total = 0.0
+        flush_ms_total = 0.0
+        embed_compute_ms_total = 0.0
+        keyword_ms_total = 0.0
+        # Persist the documents progress row only when the integer
+        # percent crosses a 5% bucket (and on the final batch). The
+        # SSE event still fires every batch (cheap, in-process), so
+        # the UI progress bar keeps ticking; this just bounds the
+        # number of UPDATE round-trips to ~20 regardless of doc size
+        # instead of one per batch — those round-trips can't overlap
+        # with the parallel embeds and become the pacing cost once
+        # embedding compute is fast.
+        _PROGRESS_BUCKET = 5
+        last_flushed_bucket = -1
+
+        while window:
+            batch_chunks, batch_texts, embed_task = window.popleft()
             batch_index += 1
-            batch_texts = [c.content for c in batch_chunks]
 
-            # Per-batch progress (SSE PROGRESS, DB row update).
+            # 3. Embed this batch's chunks FIRST. The forward pass has
+            # been running in a worker thread since the batch entered
+            # the window (possibly already done). Consuming it before
+            # the per-batch DB work (and before scheduling the next
+            # batch) keeps the embed threads busy and stops the
+            # sequential progress flush + COPY from gating the next
+            # matmul — the key to overlapping embed-CPU with DB-I/O.
+            _t_embed_await = time.monotonic()
+            vecs = await embed_task
+            embed_compute_ms_total += time.monotonic() - _t_embed_await
+            # Convert numpy → python lists (row per chunk). One call
+            # on the 2D array beats per-row `.tolist()` boxing.
+            emb_list: list[list[float]] = vecs.tolist()
+
+            # Refill the window: schedule the next batch's embed now
+            # so it overlaps with this batch's keyword-encode + COPY.
+            nxt = list(islice(chunk_seq, batch_size))
+            if nxt:
+                window.append(await _schedule_embed(nxt))
+
+            # Per-batch progress: SSE every batch (cheap, in-process),
+            # documents row only on a 5% bucket boundary (or final).
             pct = int(round(batch_index * 100 / total_batches)) if total_batches else 100
             await cb(
                 "embedding",
@@ -222,26 +324,26 @@ async def ingest_document(
                     "percent": pct,
                 },
             )
-            await store.mark_document_progress(
-                session, document,
-                current_stage="embedding",
-                stage_progress={
-                    "extracting": 100,
-                    "chunking": 100,
-                    "embedding": pct,
-                },
-            )
-
-            # 3. Embed this batch's chunks (already batched + off
-            # the event loop by `encode_batched`).
-            vecs = await encode_batched(batch_texts, normalize=True)
-            # Convert numpy → python lists (row per chunk).
-            emb_list: list[list[float]] = [v.tolist() for v in vecs]
+            bucket = (pct // _PROGRESS_BUCKET) * _PROGRESS_BUCKET
+            if bucket != last_flushed_bucket or batch_index == total_batches:
+                last_flushed_bucket = bucket
+                _t_flush = time.monotonic()
+                await store.mark_document_progress(
+                    session, document,
+                    current_stage="embedding",
+                    stage_progress={
+                        "extracting": 100,
+                        "chunking": 100,
+                        "embedding": pct,
+                    },
+                )
+                flush_ms_total += time.monotonic() - _t_flush
 
             # 4. Keywords — batched: gather every chunk's
             # candidate phrases, encode them all in one call,
             # slice back per-chunk. For 32 chunks × 8 candidates
             # this is one forward pass instead of 32.
+            _t_keyword = time.monotonic()
             batch_phrases_per_chunk: list[list[str]] = [
                 candidate_phrases(text) for text in batch_texts
             ]
@@ -276,11 +378,13 @@ async def ingest_document(
                         top_k=8,
                     )
                 )
+            keyword_ms_total += time.monotonic() - _t_keyword
 
             # 5. Persist this batch via asyncpg COPY (or the ORM
             # fallback for non-Postgres dialects). The transaction
             # is shared across all batches; we commit once at the
             # end of the pipeline.
+            _t_copy = time.monotonic()
             await store.copy_chunks(
                 session,
                 document_id=document_id,
@@ -289,8 +393,10 @@ async def ingest_document(
                 embeddings=emb_list,
                 keywords=kws_list,
             )
+            copy_ms_total += time.monotonic() - _t_copy
             embedded_count += len(batch_chunks)
 
+        _t_embed = time.monotonic()
         await cb(
             "embedded",
             {
@@ -319,7 +425,21 @@ async def ingest_document(
         )
         await store.finalize_indexing(session, user_id)
         await session.commit()
+        _t_index = time.monotonic()
 
+        # Sub-stage split of the embedding stage (embed compute vs
+        # keyword encode vs DB COPY vs progress flush). Surfaced on the
+        # `indexed` event so the perf bench (and any consumer) can see
+        # whether ingestion is DB-bound or encoder-bound. The API
+        # status-cb closure reads only `chunks`/`embedding_model`/
+        # `processing_time_ms` via payload.get(), so the extra keys are
+        # ignored by SSE — backward-compatible.
+        sub_ms = {
+            "embed_ms": int(embed_compute_ms_total * 1000),
+            "keyword_ms": int(keyword_ms_total * 1000),
+            "copy_ms": int(copy_ms_total * 1000),
+            "flush_ms": int(flush_ms_total * 1000),
+        }
         await cb(
             "indexed",
             {
@@ -327,13 +447,33 @@ async def ingest_document(
                 "chunks": chunk_count,
                 "embedding_model": settings.EMBED_MODEL_NAME,
                 "processing_time_ms": processing_time_ms,
+                **sub_ms,
             },
         )
+        # Per-stage breakdown so operators can see where time goes in
+        # the live app (matches the perf-bench stage derivation). If
+        # embedding still dominates, the next levers are a bigger
+        # batch / more workers / an off-CPU encoder.
+        stages_ms = {
+            "extracting_ms": int((_t_extract - _t0) * 1000),
+            "chunking_ms": int((_t_chunk - _t_extract) * 1000),
+            "embedding_ms": int((_t_embed - _t_chunk) * 1000),
+            "indexing_ms": int((_t_index - _t_embed) * 1000),
+            # Sub-stage split of the embedding stage — if `copy_ms` is a
+            # large fraction of `embedding_ms`, ingestion is DB-bound
+            # (chunk COPY + HNSW/GIN/tsvector maintenance); if
+            # `keyword_ms` dominates, it's encoder-bound and the next
+            # lever is the keyword path, not the DB.
+            **sub_ms,
+        }
         log.info(
             "pipeline.done",
             document_id=str(document_id),
             chunks=chunk_count,
+            workers=resolve_embed_workers(),
+            batch_size=settings.INGEST_EMBED_BATCH_SIZE,
             processing_time_ms=processing_time_ms,
+            **stages_ms,
         )
         return chunk_count
 

@@ -43,6 +43,7 @@ from app.services.providers.base import (
     CAT_RATE_LIMIT,
     CAT_SERVER,
     CAT_TIMEOUT,
+    CAT_UNKNOWN,
     CAT_UNSUPPORTED,
     ChatRequest,
     HealthReport,
@@ -80,6 +81,10 @@ def _options_to_ollama(options: Optional[dict]) -> dict[str, Any]:
 
     Ollama takes `temperature`, `top_p`, `top_k`, `num_ctx`,
     `num_predict` (max tokens), etc. under a nested `options` key.
+
+    Cross-vendor alias: the OpenAI `max_tokens` (and `max_completion_tokens`)
+    key maps to Ollama's `num_predict`. Without it a caller using the
+    OpenAI convention silently lost the answer-length cap.
     """
     if not options:
         return {}
@@ -98,6 +103,11 @@ def _options_to_ollama(options: Optional[dict]) -> dict[str, Any]:
     for k, v in options.items():
         if k in direct:
             out[k] = v
+        elif k in ("max_tokens", "max_completion_tokens") and "num_predict" not in out:
+            try:
+                out["num_predict"] = int(v)
+            except (TypeError, ValueError):
+                pass
     return out
 
 
@@ -315,6 +325,7 @@ class OllamaProvider(ProviderAdapter):
             pass
 
         try:
+            emitted_done = False
             async with self._client.stream(
                 "POST", "/api/chat", json=payload, headers=self._headers()
             ) as r:
@@ -340,9 +351,35 @@ class OllamaProvider(ProviderAdapter):
                     if ev.get("error"):
                         yield {"delta": "", "done": True, "error": ev["error"]}
                         return
-                    yield {"delta": delta, "done": done}
+                    # Ollama delivers complete tool_calls on the final
+                    # frame (not fragmented like OpenAI). Surface the
+                    # first call on the done event via an additive
+                    # `tool_call` key so streaming + tools isn't a
+                    # silent drop.
+                    ev_out: dict[str, Any] = {"delta": delta, "done": done}
+                    if done:
+                        emitted_done = True
+                        raw_calls = msg.get("tool_calls") or []
+                        if raw_calls:
+                            first = raw_calls[0] or {}
+                            fn = first.get("function") or {}
+                            raw_args = fn.get("arguments")
+                            if isinstance(raw_args, str):
+                                try:
+                                    raw_args = json.loads(raw_args) if raw_args else {}
+                                except json.JSONDecodeError:
+                                    raw_args = {"_raw": raw_args}
+                            ev_out["tool_call"] = {
+                                "name": fn.get("name") or first.get("name") or "",
+                                "arguments": raw_args or {},
+                            }
+                    yield ev_out
                     if done:
                         return
+            # Stream closed without a `done: true` frame — emit a
+            # terminal done so the SSE consumer finalizes.
+            if not emitted_done:
+                yield {"delta": "", "done": True}
         except httpx.TimeoutException as exc:
             yield {"delta": "", "done": True, "error": f"stream timeout: {exc}"}
         except httpx.HTTPError as exc:

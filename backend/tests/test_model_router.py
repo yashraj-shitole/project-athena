@@ -51,6 +51,11 @@ class _FakeRow:
     is_default: bool = False
     is_admin: bool = False
     deleted_at: Any = None
+    # The router's adapter cache fingerprints on `updated_at` so a
+    # mutated row (e.g. rotated key) invalidates the cached adapter.
+    # Real ModelConnector rows always have this; the fake defaults to
+    # None so the fingerprint is stable across a single resolve.
+    updated_at: Any = None
     api_key_enc: Optional[bytes] = None
     auth_type: str = AUTH_BEARER
     auth_header_name: Optional[str] = None
@@ -493,3 +498,38 @@ async def test_explicit_connector_id_for_missing_row_falls_through():
 
     assert conn_id == fallback_default.id
     assert model == "gpt-4o"
+
+
+@pytest.mark.asyncio
+async def test_adapter_cache_reuses_and_rebuilds_on_updated_at():
+    """The router caches one adapter per connector (so we don't
+    allocate a fresh httpx client every turn) and rebuilds it when the
+    row's `updated_at` fingerprint changes (e.g. a rotated API key).
+    """
+    row = _row(
+        owner=uuid.uuid4(),
+        name="cached",
+        base_url="https://example.com/v1",
+        default_model="m",
+    )
+    row.updated_at = "t1"
+
+    router = ModelRouter()
+    a1, _, conn_id = await router.resolve(
+        _StubSession(plan=[row]), row.user_id, connector_id=row.id
+    )
+    # Same row + same updated_at -> same adapter instance (cache hit).
+    a2, _, _ = await router.resolve(
+        _StubSession(plan=[row]), row.user_id, connector_id=row.id
+    )
+    assert a1 is a2
+    assert conn_id == row.id
+
+    # Mutating updated_at (as onupdate would on a real edit) invalidates.
+    row.updated_at = "t2"
+    a3, _, _ = await router.resolve(
+        _StubSession(plan=[row]), row.user_id, connector_id=row.id
+    )
+    assert a3 is not a1
+
+    await router.aclose()

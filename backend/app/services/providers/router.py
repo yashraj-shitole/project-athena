@@ -18,6 +18,7 @@ the list. Soft-deleted rows are never considered.
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 from typing import Optional, Tuple
 
 from sqlalchemy import select
@@ -90,23 +91,53 @@ class ModelRouter:
     """Stateless resolver.
 
     One instance per app is fine — there's no per-request state. The
-    adapter cache lives on the row's resolved `ProviderAdapter`
-    instance; we drop it on `aclose()`.
+    adapter cache keeps one warm `ProviderAdapter` (and its pooled
+    `httpx.AsyncClient`) per connector so we don't allocate a fresh
+    client on every chat turn. Cache entries are keyed on
+    `(row.id, row.updated_at)`; mutating the connector bumps
+    `updated_at` (via `onupdate=func.now()`), so a rotated API key or
+    changed base URL invalidates the entry on the next resolve and the
+    stale adapter is closed. We drop everything on `aclose()`.
     """
 
     def __init__(self) -> None:
-        # cache: row_id -> adapter. We don't use this yet; the wiring
-        # in Phase C will keep adapters warm across requests. The hook
-        # is here so the public API is stable.
-        self._cache: dict[uuid.UUID, ProviderAdapter] = {}
+        # row_id -> (updated_at, adapter). The updated_at fingerprint
+        # is what makes the cache safe across connector edits.
+        self._cache: dict[uuid.UUID, tuple[datetime, ProviderAdapter]] = {}
+        # The built-in Ollama fallback has no DB row; cache it separately
+        # so the common Phase-1 path doesn't allocate a client per turn.
+        self._fallback_adapter: Optional[ProviderAdapter] = None
 
     async def aclose(self) -> None:
-        for adapter in self._cache.values():
+        for _ts, adapter in self._cache.values():
             try:
                 await adapter.aclose()
             except Exception:  # noqa: BLE001
                 pass
+        if self._fallback_adapter is not None:
+            try:
+                await self._fallback_adapter.aclose()
+            except Exception:  # noqa: BLE001
+                pass
+            self._fallback_adapter = None
         self._cache.clear()
+
+    async def _cached_adapter(self, row: ModelConnector) -> ProviderAdapter:
+        """Return a warm adapter for `row`, rebuilding it if the row's
+        `updated_at` fingerprint changed since it was cached."""
+        cached = self._cache.get(row.id)
+        if cached is not None and cached[0] == row.updated_at:
+            return cached[1]
+        # Stale or missing — close the old adapter (releases its pooled
+        # httpx connection) before we drop the reference.
+        if cached is not None:
+            try:
+                await cached[1].aclose()
+            except Exception:  # noqa: BLE001
+                pass
+        adapter = _build_adapter(row)
+        self._cache[row.id] = (row.updated_at, adapter)
+        return adapter
 
     async def resolve(
         self,
@@ -126,7 +157,11 @@ class ModelRouter:
         if connector_id is not None:
             row = await self._load_connector(session, connector_id, user_id)
             if row is not None and row.is_enabled:
-                return _build_adapter(row), (model_hint or row.default_model), row.id
+                return (
+                    await self._cached_adapter(row),
+                    (model_hint or row.default_model),
+                    row.id,
+                )
             if row is not None and not row.is_enabled:
                 log.info(
                     "router.connector_disabled",
@@ -137,12 +172,20 @@ class ModelRouter:
         # 2. user default.
         row = await self._load_user_default(session, user_id)
         if row is not None and row.is_enabled:
-            return _build_adapter(row), (model_hint or row.default_model), row.id
+            return (
+                await self._cached_adapter(row),
+                (model_hint or row.default_model),
+                row.id,
+            )
 
         # 3. system default (admin-shared).
         row = await self._load_system_default(session)
         if row is not None and row.is_enabled:
-            return _build_adapter(row), (model_hint or row.default_model), row.id
+            return (
+                await self._cached_adapter(row),
+                (model_hint or row.default_model),
+                row.id,
+            )
 
         # 4. built-in Ollama fallback.
         adapter = await self._ollama_fallback()
@@ -195,21 +238,23 @@ class ModelRouter:
     async def _ollama_fallback(self) -> ProviderAdapter:
         """The built-in Ollama client, exposed as an adapter.
 
-        Today, the orchestrator's `LLMClient` is hard-coded to Ollama.
-        Phase C will rewrite it to go through the router; the fallback
-        is the path that keeps Phase 1 behaviour intact.
+        Cached on the router so the common Phase-1 path (no connector
+        configured) doesn't allocate a new `httpx.AsyncClient` on every
+        chat turn.
         """
+        if self._fallback_adapter is not None:
+            return self._fallback_adapter
         from app.core.config import get_settings
         from app.services.providers.ollama import OllamaProvider
 
         # Settings is read at fallback time so test config (which
-        # mutates env vars) is picked up.
+        # mutates env vars) is picked up on first use.
         s = get_settings()
         # Use the native Ollama adapter (POST /api/chat), not the
         # OpenAI-compat shim: OLLAMA_BASE_URL defaults to the server
         # root (http://localhost:11434, no /v1), so the compat path's
         # {base_url}/chat/completions 404s. /api/chat works at the root.
-        return OllamaProvider(
+        adapter = OllamaProvider(
             base_url=s.OLLAMA_BASE_URL,
             api_key=None,
             auth_type="none",
@@ -218,6 +263,8 @@ class ModelRouter:
             default_model=s.OLLAMA_MODEL,
             models=[s.OLLAMA_MODEL],
         )
+        self._fallback_adapter = adapter
+        return adapter
 
 
 __all__ = ["ModelRouter", "ProviderError"]

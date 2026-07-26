@@ -13,6 +13,7 @@ imports, and only at first use.
 from __future__ import annotations
 
 import asyncio
+import os
 import threading
 from functools import lru_cache
 from typing import TYPE_CHECKING, Awaitable, Callable, List, Optional, Sequence
@@ -29,6 +30,53 @@ log = get_logger(__name__)
 
 _lock = threading.Lock()
 _model: "SentenceTransformer | None" = None
+
+# Whether we've already applied the torch intra-op thread cap for
+# parallel encoding. `torch.set_num_threads` is process-global and
+# applies to all subsequent torch ops, so we only want to pay the
+# (tiny) cost and the side-effect once.
+_torch_threads_tuned = False
+
+
+def resolve_embed_workers() -> int:
+    """Resolve the ingestion embedding worker count.
+
+    ``settings.INGEST_EMBED_WORKERS`` is the raw knob; ``0`` means
+    auto-pick (min(8, cpu_count)). The result is clamped to >=1.
+    """
+    raw = settings.INGEST_EMBED_WORKERS
+    if raw and raw > 0:
+        return raw
+    cpu = os.cpu_count() or 4
+    return max(1, min(8, cpu))
+
+
+def tune_torch_threads_for_workers(workers: int) -> None:
+    """Cap torch's intra-op thread pool so fanning `workers` concurrent
+    encodes across threads doesn't oversubscribe the CPU.
+
+    With the default torch thread count (= cpu_count), running N
+    concurrent ``model.encode`` calls spawns N×cpu threads that thrash
+    the scheduler and lose the parallel speedup. We cap intra-op
+    threads to ``cpu // workers`` (>=1) so the total in-flight threads
+    stays ≈ cpu_count. This is process-global and one-shot; it also
+    applies to retrieval query encoding afterwards, which is a single
+    sentence and barely affected.
+
+    No-op when workers <= 1 (preserve the single-batch, full-thread
+    path) or when torch isn't importable (test envs stub the model).
+    """
+    global _torch_threads_tuned
+    if _torch_threads_tuned or workers <= 1:
+        return
+    try:
+        import torch
+
+        cpu = os.cpu_count() or workers
+        torch.set_num_threads(max(1, cpu // workers))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("embedding.torch_threads.tune_failed", error=str(exc))
+    _torch_threads_tuned = True
 
 
 def get_model() -> "SentenceTransformer":

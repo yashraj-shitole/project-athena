@@ -17,6 +17,7 @@ from app.core.cache import get_json, set_json
 from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.services.retrieval.hybrid import hybrid_search
+from app.services.retrieval.rerank import rerank
 
 log = get_logger(__name__)
 _settings = get_settings()
@@ -49,7 +50,8 @@ async def retrieve(
     *,
     session: AsyncSession,
     user_id: uuid.UUID,
-    keywords: List[str] | str,
+    keywords: List[str] | str | None = None,
+    query: str | None = None,
     top_k: int | None = None,
 ) -> List[dict[str, Any]]:
     """Cached hybrid retrieval.
@@ -57,13 +59,21 @@ async def retrieve(
     Inputs:
         session:   an open AsyncSession
         user_id:   the requesting user (used for RLS GUC and cache key)
-        keywords:  list of keyword strings, or a free-form query string
+        keywords:  list of keyword strings, or a free-form query string,
+                   fed to the lexical tsquery. Optional when `query` is
+                   supplied.
+        query:     the raw user message, used to build the vector
+                   embedding. Strongly preferred over passing keywords
+                   as `query` — a stopword-stripped keyword bag produces
+                   a weaker semantic embedding than the natural-language
+                   sentence. Falls back to `keywords` when omitted.
         top_k:     default = settings.RETRIEVAL_TOP_K
 
     Returns: a list of chunk dicts in the shape consumed by the prompter
         and the `search_documents` tool.
     """
-    if not keywords:
+    sem_query = (query or "").strip()
+    if not keywords and not sem_query:
         return []
     top_k = top_k or _settings.RETRIEVAL_TOP_K
     # NOTE: we intentionally do NOT call set_rls_user(session, user_id) here.
@@ -75,21 +85,37 @@ async def retrieve(
     # App-layer `WHERE user_id = :uid` predicates in lexical/vector SQL
     # provide the authoritative tenant filter.
 
-    # Cache only on string queries; bypass when LLM sends a list (still
-    # build a deterministic key from the list).
-    query_str = keywords if isinstance(keywords, str) else " ".join(keywords)
-    cache_key = _cache_key(user_id, query_str, top_k)
+    # Lexical query string from keywords; fall back to the raw semantic
+    # query when no keywords were supplied.
+    if isinstance(keywords, str):
+        lex_query = keywords
+    elif keywords:
+        lex_query = " ".join(keywords)
+    else:
+        lex_query = sem_query
+
+    # Cache key includes the raw semantic query when supplied — vector
+    # results depend on it even when the lexical keywords are identical,
+    # so keying only on keywords would return stale vector hits.
+    cache_query = sem_query or lex_query
+    cache_key = _cache_key(user_id, cache_query, top_k)
     cached = await get_json(_settings.CACHE_PREFIX_RETRIEVAL, cache_key)
     if cached is not None:
-        log.debug("retrieval.cache.hit", user_id=str(user_id), q=query_str[:64])
+        log.debug("retrieval.cache.hit", user_id=str(user_id), q=cache_query[:64])
         return cached[:top_k]
 
     hits = await hybrid_search(
         session,
         user_id=user_id,
-        query=query_str,
+        query=sem_query or lex_query,
+        keywords=lex_query or None,
         top_k=top_k,
     )
+    # Rerank is currently a model-free re-slice (identity order) — but
+    # routing through it here is what makes a future cross-encoder
+    # reranker drop-in. It also applies the final top_k consistently
+    # across the lexical-only, vector-only, and fused paths.
+    hits = rerank(sem_query or lex_query, hits, top_k=top_k)
     # Cache as JSON-serialisable lists (uuids → str, etc.)
     serializable = []
     for h in hits:
@@ -114,7 +140,7 @@ async def retrieve(
     log.debug(
         "retrieval.cache.miss",
         user_id=str(user_id),
-        q=query_str[:64],
+        q=cache_query[:64],
         hits=len(serializable),
     )
     return serializable
