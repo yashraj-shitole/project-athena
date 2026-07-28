@@ -2,64 +2,64 @@
 # fastapi >= 0.109.1 / Starlette >= 0.35.1 fix the multipart/form-data
 #   ReDoS (CVE-2024-24762, CVE-2024-45338 style). 0.115.6 also patches
 #   the python-multipart boundary ReDoS (CVE-2024-47805).
-fastapi==0.115.6
-uvicorn[standard]==0.30.6
+fastapi==0.140.7
+uvicorn[standard]==0.51.0
 # python-multipart < 0.0.18 is vulnerable to a boundary-parsing ReDoS
 # (CVE-2024-47805) exploitable via multipart form uploads.
-python-multipart==0.0.20
+python-multipart==0.0.32
 
 # --- Validation / settings ---
-pydantic==2.9.2
-pydantic-settings==2.5.2
-email-validator==2.2.0
+pydantic==2.13.4
+pydantic-settings==2.14.2
+email-validator==2.3.0
 
 # --- Database (async) ---
-sqlalchemy[asyncio]==2.0.35
-greenlet>=3.0.3            # required by SQLAlchemy's async engine (greenlet_spawn)
-asyncpg==0.29.0
-psycopg2-binary==2.9.9         # sync driver for one-off migrations/tools
-pgvector==0.3.6                # pgvector SQLAlchemy type (vector(N))
-alembic==1.13.3                # optional; schema is also installable via init.sql
+sqlalchemy[asyncio]==2.0.51
+greenlet>=3.5.4            # required by SQLAlchemy's async engine (greenlet_spawn)
+asyncpg==0.31.0
+psycopg2-binary==2.9.12         # sync driver for one-off migrations/tools
+pgvector==0.5.0                # pgvector SQLAlchemy type (vector(N))
+alembic==1.18.5                # optional; schema is also installable via init.sql
 
 # --- Auth ---
-PyJWT==2.9.0
-bcrypt==4.2.0
+PyJWT==2.13.0
+bcrypt==5.0.0
 
 # --- External Model Connectors (encrypted credential storage) ---
-cryptography==43.0.1
+cryptography==49.0.0
 
 # --- Tool validation ---
-jsonschema==4.23.0
+jsonschema==4.26.0
 
 # --- Redis / cache ---
-redis[hiredis]==5.1.0
+redis[hiredis]==8.0.1
 
 # --- HTTP (used by tool connectors and Ollama client) ---
-httpx==0.27.2
+httpx==0.28.1
 
 # --- Document parsing ---
-pypdf==5.0.1                   # PDF text extraction
-pdfplumber==0.11.4             # PDF tables / structure fallback
-python-docx==1.1.2             # DOCX
+pypdf==6.14.2                   # PDF text extraction
+pdfplumber==0.11.10             # PDF tables / structure fallback
+python-docx==1.2.0             # DOCX
 openpyxl==3.1.5                # XLSX
-pandas==2.2.3                  # CSV / XLSX row processing
-chardet==5.2.0                 # CSV encoding detection
+pandas==3.0.5                  # CSV / XLSX row processing
+chardet==7.4.3                 # CSV encoding detection
 
 # --- NLP / embeddings / keyword extraction ---
-numpy==1.26.4
-scikit-learn==1.5.2
-sentence-transformers==3.1.1   # all-MiniLM-L6-v2 (384-dim)
-nltk==3.9.1
-tiktoken==0.8.0                # token counting for budget enforcement
+numpy==2.5.1
+scikit-learn==1.9.0
+sentence-transformers==5.6.1   # all-MiniLM-L6-v2 (384-dim)
+nltk==3.10.0
+tiktoken==0.13.0                # token counting for budget enforcement
 
 # --- Misc ---
-python-dotenv==1.0.1
-tenacity==9.0.0                # retry/backoff for LLM and external calls
-structlog==24.4.0              # structured logging
+python-dotenv==1.2.2
+tenacity==9.1.4                # retry/backoff for LLM and external calls
+structlog==26.1.0              # structured logging
 
 # --- Test ---
-pytest==8.3.3
-pytest-asyncio==0.24.0
-respx==0.21.1            # httpx mocking for provider-adapter tests
-httpx==0.27.2
-aiosqlite==0.20.0           # in-memory DB for hermetic unit tests
+pytest==9.1.1
+pytest-asyncio==1.4.0
+respx==0.23.1            # httpx mocking for provider-adapter tests
+httpx==0.28.1
+aiosqlite==0.22.1           # in-memory DB for hermetic unit tests
