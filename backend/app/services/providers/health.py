@@ -131,7 +131,11 @@ class HealthProbe:
         async with self._lock_for(row.id):
             try:
                 adapter = _build_adapter(row)
-            except (ProviderError, Exception) as exc:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                # Includes ProviderError (e.g. SSRF-rejected base URL)
+                # and registry/crypto failures. ProviderError is a
+                # RuntimeError subclass, so listing it separately in the
+                # tuple was redundant.
                 log.warning(
                     "connector.health.build_failed",
                     connector_id=str(row.id),
@@ -189,7 +193,18 @@ def _build_adapter(row: ModelConnector) -> ProviderAdapter:
     health loop can run without depending on the request-time
     router. The two paths MUST stay in sync — a drift here would
     mean the probe uses a different shape than the live call.
+
+    SSRF: every outbound base URL is validated here, exactly once at
+    build time, mirroring `router._build_adapter`. Without this a
+    connector row with a malicious `base_url` (e.g. an internal
+    metadata-service IP) would be probed by the background loop with
+    no validation — the request-time router checks it, but the health
+    loop runs outside a request.
     """
+    from app.core.ssrf import assert_safe_url
+
+    assert_safe_url(row.base_url, allow_loopback=True)
+
     cls = provider_registry.get(row.provider)
     api_key = None
     if row.api_key_enc:
@@ -237,5 +252,4 @@ __all__ = [
     "get_probe",
     "start_probe",
     "stop_probe",
-    "tick_once",
 ]

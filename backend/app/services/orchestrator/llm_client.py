@@ -64,9 +64,13 @@ def _first_tool_call(message: dict) -> dict | None:
 
 
 def _build_options() -> dict[str, Any]:
+    # `num_ctx` is Ollama-only (other adapters ignore it via option
+    # passthrough). Set it to the real model context window, not the
+    # *prompt* budget — the prompter may assemble up to TOKEN_BUDGET_TOTAL
+    # tokens and the model must be able to receive all of them.
     return {
         "temperature": 0.2,
-        "num_ctx": _settings.TOKEN_BUDGET_TOTAL + 64,
+        "num_ctx": _settings.MODEL_CONTEXT_TOKENS,
         "num_predict": _settings.TOKEN_BUDGET_ANSWER,
     }
 

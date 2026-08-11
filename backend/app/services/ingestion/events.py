@@ -5,6 +5,22 @@ connected browser tabs. Phase 2 (real worker + replicas) will move this
 to Redis pub/sub; the public surface here is shaped so that swap is a
 one-file change.
 
+Future-worker seam
+------------------
+The swap to a real worker + Redis pub/sub replaces only the body of
+this module — `subscribe`, `publish`, `history`, `is_terminal`,
+`mark_terminal`, `reopen`, and `shutdown` keep their signatures.
+Callers (the pipeline's `status_cb` closure in `app.api.documents`
+and the SSE handler) are unchanged. The only outside change is the
+single line in `app.api.documents` that currently does
+`background.add_task(_run_ingest, ...)` — that becomes
+`await queue.enqueue("ingest_document", ...)`.
+
+The matching seam comment in `app.api.documents` describes the queue
+side. This module owns the broker side: pub/sub + per-doc state
+become Redis channels + Redis keys; the in-process
+`asyncio.Queue[bytes]` and `collections.deque` are gone.
+
 Wire format: see `app.services.llm.streamer.sse()`. Bytes are stored and
 forwarded as-is so the SSE shape stays owned by `streamer.sse()`.
 

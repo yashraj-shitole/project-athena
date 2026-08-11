@@ -13,7 +13,7 @@
 param(
     [switch]$Integration
 )
-. (Join-Path $PSScriptRoot '..\goThrough\_helpers.ps1')
+. (Join-Path $PSScriptRoot '..\..\scripts\goThrough\_helpers.ps1')
 Enter-ProjectRoot
 
 if (-not (Test-Prereqs)) { exit 1 }

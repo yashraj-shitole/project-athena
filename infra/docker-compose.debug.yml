@@ -3,9 +3,9 @@
 # Use on top of the base file:
 #   docker compose -f infra/docker-compose.yml -f infra/docker-compose.debug.yml up
 # or via the scripts:
-#   ./docker-up.ps1 -Debug           # full stack, debug profile
-#   ./docker-up.ps1 -Debug -Watch    # + follow logs
-#   ./debug-all.ps1
+#   ./scripts/docker-up.ps1 -Debug           # full stack, debug profile
+#   ./scripts/docker-up.ps1 -Debug -Watch    # + follow logs
+#   ./scripts/debug-all.ps1
 #
 # What this override enables:
 #   - Backend hot reload: uvicorn --reload watching /app/backend/app; the host

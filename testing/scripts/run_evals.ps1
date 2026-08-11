@@ -10,7 +10,7 @@ param(
     [switch]$Baseline,
     [switch]$Check
 )
-. (Join-Path $PSScriptRoot '..\goThrough\_helpers.ps1')
+. (Join-Path $PSScriptRoot '..\..\scripts\goThrough\_helpers.ps1')
 Enter-ProjectRoot
 
 $script:Runner = Join-Path $REPO_ROOT 'testing/llm_evals/runners/run_eval.py'

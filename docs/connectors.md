@@ -85,7 +85,7 @@ The streaming path is unsupported — the adapter yields an error event with `do
 
 ## Data model
 
-`infra/init.sql` (idempotent, applied by `docker-up.ps1`):
+`infra/init.sql` (idempotent, applied by `scripts/docker-up.ps1`):
 
 ### `model_connectors`
 

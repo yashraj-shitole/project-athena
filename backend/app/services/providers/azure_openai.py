@@ -209,7 +209,28 @@ class AzureOpenAIProvider(ProviderAdapter):
         payload.update(_options_to_payload(req.options, stream=True))
 
         path = self._path(deployment)
+        json_mod = __import__("json")
         try:
+            emitted_done = False
+            # Accumulate streamed tool-call fragments (see openai_compat
+            # stream() for the format). Surface the first call on the
+            # terminal event via an additive `tool_call` key.
+            tool_acc: dict[int, dict[str, Any]] = {}
+
+            def _finalize_tool_call() -> Optional[dict[str, Any]]:
+                if not tool_acc:
+                    return None
+                first = tool_acc[0] if 0 in tool_acc else next(iter(tool_acc.values()))
+                raw_args = first.get("arguments", "")
+                if isinstance(raw_args, str) and raw_args:
+                    try:
+                        args = json_mod.loads(raw_args)
+                    except json_mod.JSONDecodeError:
+                        args = {"_raw": raw_args}
+                else:
+                    args = raw_args or {}
+                return {"name": first.get("name") or "", "arguments": args}
+
             async with self._client.stream(
                 "POST",
                 path,
@@ -231,10 +252,15 @@ class AzureOpenAIProvider(ProviderAdapter):
                     if line.startswith("data:"):
                         line = line[len("data:") :].strip()
                     if line == "[DONE]":
-                        yield {"delta": "", "done": True}
+                        ev_done: dict[str, Any] = {"delta": "", "done": True}
+                        tc = _finalize_tool_call()
+                        if tc:
+                            ev_done["tool_call"] = tc
+                        yield ev_done
+                        emitted_done = True
                         return
                     try:
-                        ev = __import__("json").loads(line)
+                        ev = json_mod.loads(line)
                     except Exception:
                         continue
                     try:
@@ -243,11 +269,36 @@ class AzureOpenAIProvider(ProviderAdapter):
                         continue
                     msg = choice.get("delta") or {}
                     delta = msg.get("content") or ""
+                    for tc in msg.get("tool_calls") or []:
+                        if not isinstance(tc, dict):
+                            continue
+                        idx = tc.get("index", 0)
+                        slot = tool_acc.setdefault(idx, {"name": "", "arguments": ""})
+                        fn = tc.get("function") or {}
+                        if fn.get("name"):
+                            slot["name"] = fn["name"]
+                        if isinstance(fn.get("arguments"), str):
+                            slot["arguments"] += fn["arguments"]
                     finish = choice.get("finish_reason")
-                    yield {
+                    if finish is not None:
+                        emitted_done = True
+                    ev_out: dict[str, Any] = {
                         "delta": delta,
                         "done": finish is not None,
                     }
+                    if finish is not None:
+                        tc = _finalize_tool_call()
+                        if tc:
+                            ev_out["tool_call"] = tc
+                    yield ev_out
+            # Stream ended without [DONE] or a finish_reason chunk —
+            # emit a terminal done so the SSE consumer finalizes.
+            if not emitted_done:
+                ev_done = {"delta": "", "done": True}
+                tc = _finalize_tool_call()
+                if tc:
+                    ev_done["tool_call"] = tc
+                yield ev_done
         except httpx.TimeoutException as exc:
             yield {"delta": "", "done": True, "error": f"stream timeout: {exc}"}
         except httpx.HTTPError as exc:

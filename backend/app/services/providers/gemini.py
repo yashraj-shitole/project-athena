@@ -39,6 +39,7 @@ from app.services.providers.base import (
     CAT_RATE_LIMIT,
     CAT_SERVER,
     CAT_TIMEOUT,
+    CAT_UNKNOWN,
     CAT_UNSUPPORTED,
     ChatRequest,
     HealthReport,
@@ -72,15 +73,24 @@ def _categorize_http(status: int) -> str:
 
 
 def _split_system(messages: list[dict]) -> tuple[Optional[str], list[dict]]:
+    """Collect every `role == "system"` message into `system_instruction`.
+
+    Gemini takes the system prompt under `system_instruction.parts[*].text`;
+    any `system` entry left in `contents` is silently dropped by
+    `_contents`. The earlier version only captured the first system
+    message, so a second one (e.g. the orchestrator's corrective retry
+    note) was lost. We now merge all of them.
+    """
     out: list[dict] = []
-    system: Optional[str] = None
+    system_parts: list[str] = []
     for m in messages:
-        if m.get("role") == "system" and system is None:
+        if m.get("role") == "system":
             content = m.get("content")
-            if isinstance(content, str):
-                system = content
+            if isinstance(content, str) and content:
+                system_parts.append(content)
             continue
         out.append(m)
+    system = "\n\n".join(system_parts) if system_parts else None
     return system, out
 
 
@@ -138,7 +148,14 @@ def _tools_gemini(tools: Optional[list[dict]]) -> Optional[list[dict]]:
 
 
 def _options_to_payload(options: Optional[dict]) -> dict[str, Any]:
-    """Translate `options` to Gemini's `generationConfig` shape."""
+    """Translate `options` to Gemini's `generationConfig` shape.
+
+    Cross-vendor aliases are mapped so the orchestrator's shared
+    options dict (OpenAI/Ollama naming) still reaches Gemini:
+      `stop`         -> `stopSequences`
+      `num_predict`  -> `maxOutputTokens`  (Ollama answer cap)
+      `response_format` / `json_mode` -> `responseMimeType: application/json`
+    """
     if not options:
         return {}
     out: dict[str, Any] = {}
@@ -154,6 +171,22 @@ def _options_to_payload(options: Optional[dict]) -> dict[str, Any]:
     for k, v in options.items():
         if k in direct:
             gen[direct[k]] = v
+        elif k == "num_predict":
+            try:
+                gen["maxOutputTokens"] = int(v)
+            except (TypeError, ValueError):
+                pass
+        elif k == "stop":
+            if isinstance(v, (list, tuple)):
+                gen["stopSequences"] = list(v)
+            elif v:
+                gen["stopSequences"] = [str(v)]
+        elif k == "response_format" and isinstance(v, dict):
+            # OpenAI json_object -> Gemini application/json.
+            if v.get("type") == "json_object" or v.get("type") == "json_schema":
+                gen["responseMimeType"] = "application/json"
+        elif k == "json_mode" and v:
+            gen["responseMimeType"] = "application/json"
     if gen:
         out["generationConfig"] = gen
     return out
@@ -283,9 +316,14 @@ class GeminiProvider(ProviderAdapter):
             if tools:
                 payload["tools"] = tools
         # Default to a low temperature if the orchestrator didn't pin one.
+        # Merge the translated options INTO the generationConfig so a
+        # default temperature isn't clobbered when other options are set.
+        gen_cfg = payload.setdefault("generationConfig", {})
         if not (req.options or {}).get("temperature"):
-            payload.setdefault("generationConfig", {})["temperature"] = _TEMPERATURE_DEFAULT
-        payload.update(_options_to_payload(req.options))
+            gen_cfg["temperature"] = _TEMPERATURE_DEFAULT
+        opts = _options_to_payload(req.options)
+        if opts.get("generationConfig"):
+            gen_cfg.update(opts["generationConfig"])
 
         auth = self._auth_kwargs()
         path = f"/v1beta/models/{model}:generateContent"
@@ -343,9 +381,12 @@ class GeminiProvider(ProviderAdapter):
             tools = _tools_gemini(req.tools)
             if tools:
                 payload["tools"] = tools
+        gen_cfg = payload.setdefault("generationConfig", {})
         if not (req.options or {}).get("temperature"):
-            payload.setdefault("generationConfig", {})["temperature"] = _TEMPERATURE_DEFAULT
-        payload.update(_options_to_payload(req.options))
+            gen_cfg["temperature"] = _TEMPERATURE_DEFAULT
+        opts = _options_to_payload(req.options)
+        if opts.get("generationConfig"):
+            gen_cfg.update(opts["generationConfig"])
 
         auth = self._auth_kwargs()
         path = f"/v1beta/models/{model}:streamGenerateContent"
@@ -354,6 +395,11 @@ class GeminiProvider(ProviderAdapter):
         params = dict(auth["params"])
         params["alt"] = "sse"
         try:
+            emitted_done = False
+            # Gemini streams a functionCall as a complete part (args are
+            # not fragmented). Capture the first one and surface it on
+            # the terminal event via an additive `tool_call` key.
+            tool_call: Optional[dict[str, Any]] = None
             async with self._client.stream(
                 "POST", path, params=params, json=payload, headers=auth["headers"]
             ) as r:
@@ -382,18 +428,44 @@ class GeminiProvider(ProviderAdapter):
                     if not isinstance(parts, list):
                         continue
                     delta_text = ""
-                    finish = None
                     for p in parts:
-                        if isinstance(p, dict) and "text" in p and p["text"]:
+                        if not isinstance(p, dict):
+                            continue
+                        if "text" in p and p["text"]:
                             delta_text += p["text"]
+                        fn = p.get("functionCall")
+                        if fn and tool_call is None:
+                            raw_args = fn.get("args") or {}
+                            if isinstance(raw_args, str):
+                                try:
+                                    raw_args = json.loads(raw_args) if raw_args else {}
+                                except json.JSONDecodeError:
+                                    raw_args = {"_raw": raw_args}
+                            tool_call = {
+                                "name": fn.get("name") or "",
+                                "arguments": raw_args or {},
+                            }
                     finish = (candidates[0] or {}).get("finishReason")
-                    yield {
-                        "delta": delta_text,
-                        "done": bool(finish and finish != "STOP"),
-                    }
-                    if finish and finish != "STOP":
-                        # Final event; stop iterating.
+                    # `STOP` is Gemini's normal completion reason. Any
+                    # non-None finishReason (STOP, MAX_TOKENS, SAFETY,
+                    # RECITATION, ...) marks the final chunk — yield
+                    # done=True and stop. The previous code treated STOP
+                    # as "not done", so the generator returned without a
+                    # terminal done event and the SSE consumer hung.
+                    if finish is not None:
+                        emitted_done = True
+                        ev_done: dict[str, Any] = {"delta": delta_text, "done": True}
+                        if tool_call is not None:
+                            ev_done["tool_call"] = tool_call
+                        yield ev_done
                         return
+                    yield {"delta": delta_text, "done": False}
+            # Stream closed without a finishReason — emit terminal done.
+            if not emitted_done:
+                ev_done = {"delta": "", "done": True}
+                if tool_call is not None:
+                    ev_done["tool_call"] = tool_call
+                yield ev_done
         except httpx.TimeoutException as exc:
             yield {"delta": "", "done": True, "error": f"stream timeout: {exc}"}
         except httpx.HTTPError as exc:

@@ -2,7 +2,7 @@
 # Run the LLM evaluation suite. Mirrors run_evals.ps1.
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-. "$SCRIPT_DIR/../goThrough/_helpers.sh"
+. "$SCRIPT_DIR/../../scripts/goThrough/_helpers.sh"
 enter_project_root
 RUNNER="$ATHENA_REPO_ROOT/testing/llm_evals/runners/run_eval.py"
 

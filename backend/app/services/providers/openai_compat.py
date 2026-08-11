@@ -43,6 +43,7 @@ from app.services.providers.base import (
     CAT_RATE_LIMIT,
     CAT_SERVER,
     CAT_TIMEOUT,
+    CAT_UNKNOWN,
     CAT_UNSUPPORTED,
     ChatRequest,
     HealthReport,
@@ -117,29 +118,27 @@ def _options_to_payload(
 
     The OpenAI API expects `temperature`, `top_p`, `max_tokens`, etc.
     at the top level of the body, not under a nested `options` key
-    (that's Ollama's convention). We translate the common fields; an
-    unrecognized key is passed through verbatim so the user can set
-    provider-specific params like `frequency_penalty`.
+    (that's Ollama's convention). Recognized keys are copied through,
+    and — as the docstring has always claimed — any *unrecognized* key
+    is also passed through verbatim so the user can set provider-
+    specific params we don't know about yet.
+
+    The one exception is Ollama-only knobs (`num_ctx`, `num_predict`)
+    that the shared orchestrator `_build_options` injects for every
+    adapter. OpenAI-compat endpoints 400 on them, so we drop them
+    here rather than forcing every caller to know which adapter is
+    resolved.
     """
     if not options:
         return {"stream": stream}
     out: dict[str, Any] = {"stream": stream}
-    # These are the keys we know about. Anything else is copied
-    # through as-is.
-    direct = (
-        "temperature",
-        "top_p",
-        "max_tokens",
-        "frequency_penalty",
-        "presence_penalty",
-        "seed",
-        "stop",
-        "user",
-        "response_format",
-    )
+    # Ollama-only keys the shared options dict may carry; never send
+    # them to an OpenAI-compat endpoint.
+    _skip = frozenset({"num_ctx", "num_predict"})
     for k, v in options.items():
-        if k in direct:
-            out[k] = v
+        if k in _skip:
+            continue
+        out[k] = v
     return out
 
 
@@ -366,6 +365,33 @@ class OpenAICompatibleProvider(ProviderAdapter):
             pass
 
         try:
+            emitted_done = False
+            # Accumulate streamed tool-call fragments by index. OpenAI
+            # streams tool calls as: first delta carries {index, id,
+            # function.name}, subsequent deltas carry {index,
+            # function.arguments} as JSON-string fragments. We assemble
+            # them and surface the first call on the terminal event via
+            # an additive `tool_call` key (non-breaking: the existing
+            # SSE consumer reads only `delta`/`done`/`error`).
+            tool_acc: dict[int, dict[str, Any]] = {}
+
+            def _finalize_tool_call() -> Optional[dict[str, Any]]:
+                if not tool_acc:
+                    return None
+                first = tool_acc[0] if 0 in tool_acc else next(iter(tool_acc.values()))
+                raw_args = first.get("arguments", "")
+                if isinstance(raw_args, str) and raw_args:
+                    try:
+                        args = json.loads(raw_args)
+                    except json.JSONDecodeError:
+                        args = {"_raw": raw_args}
+                else:
+                    args = raw_args or {}
+                return {
+                    "name": first.get("name") or "",
+                    "arguments": args,
+                }
+
             async with self._client.stream(
                 "POST",
                 "/chat/completions",
@@ -387,7 +413,12 @@ class OpenAICompatibleProvider(ProviderAdapter):
                     if line.startswith("data:"):
                         line = line[len("data:") :].strip()
                     if line == "[DONE]":
-                        yield {"delta": "", "done": True}
+                        ev_done: dict[str, Any] = {"delta": "", "done": True}
+                        tc = _finalize_tool_call()
+                        if tc:
+                            ev_done["tool_call"] = tc
+                        yield ev_done
+                        emitted_done = True
                         return
                     try:
                         ev = json.loads(line)
@@ -402,11 +433,41 @@ class OpenAICompatibleProvider(ProviderAdapter):
                         continue
                     msg = choice.get("delta") or {}
                     delta = msg.get("content") or ""
+                    # Accumulate tool-call fragments.
+                    for tc in msg.get("tool_calls") or []:
+                        if not isinstance(tc, dict):
+                            continue
+                        idx = tc.get("index", 0)
+                        slot = tool_acc.setdefault(
+                            idx, {"name": "", "arguments": ""}
+                        )
+                        fn = tc.get("function") or {}
+                        if fn.get("name"):
+                            slot["name"] = fn["name"]
+                        if isinstance(fn.get("arguments"), str):
+                            slot["arguments"] += fn["arguments"]
                     finish = choice.get("finish_reason")
-                    yield {
+                    if finish is not None:
+                        emitted_done = True
+                    ev_out: dict[str, Any] = {
                         "delta": delta,
                         "done": finish is not None,
                     }
+                    if finish is not None:
+                        tc = _finalize_tool_call()
+                        if tc:
+                            ev_out["tool_call"] = tc
+                    yield ev_out
+            # The upstream closed the stream without a `[DONE]` sentinel
+            # and without a finish_reason chunk (some proxies / local
+            # servers do this). Emit a terminal done so the SSE consumer
+            # finalizes instead of waiting forever.
+            if not emitted_done:
+                ev_done = {"delta": "", "done": True}
+                tc = _finalize_tool_call()
+                if tc:
+                    ev_done["tool_call"] = tc
+                yield ev_done
         except httpx.TimeoutException as exc:
             yield {
                 "delta": "",

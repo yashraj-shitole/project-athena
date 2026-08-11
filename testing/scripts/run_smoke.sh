@@ -3,7 +3,7 @@
 # Mirrors run_smoke.ps1.
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-. "$SCRIPT_DIR/../goThrough/_helpers.sh"
+. "$SCRIPT_DIR/../../scripts/goThrough/_helpers.sh"
 enter_project_root
 check_prereqs || exit 1
 

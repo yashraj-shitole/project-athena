@@ -4,7 +4,7 @@ This walks you from a clean checkout to a running app on `localhost`.
 
 > **Prefer the scripts.** The repo-root automation layer does everything below
 > in one command, with env validation and health waits:
-> `.\build.ps1 ; .\docker-up.ps1` (PowerShell) or `./build.sh && ./docker-up.sh`
+> `.\scripts\build.ps1 ; .\scripts\docker-up.ps1` (PowerShell) or `./scripts/build.sh && ./scripts/docker-up.sh`
 > (bash). See [development/DeveloperScripts.md](development/DeveloperScripts.md)
 > for the full surface. The manual steps below remain useful for understanding
 > what the scripts do, and for the local-backend (Option B/C) workflows.
