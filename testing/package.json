@@ -14,7 +14,7 @@
   "devDependencies": {
     "vitest": "^2.0.0",
     "@testing-library/react": "^16.0.0",
-    "@testing-library/jest-dom": "^6.5.0",
+    "@testing-library/jest-dom": "^7.0.0",
     "@playwright/test": "^1.48.0",
     "axe-core": "^4.10.0",
     "jsdom": "^25.0.0"
