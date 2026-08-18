@@ -26,7 +26,7 @@
     "react-router-dom": "^7.18.1",
     "remark-gfm": "^4.0.0",
     "tailwind-merge": "^2.5.4",
-    "zustand": "^4.5.5"
+    "zustand": "^5.0.15"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^6.0.3",
