@@ -2,54 +2,54 @@
 # fastapi >= 0.109.1 / Starlette >= 0.35.1 fix the multipart/form-data
 #   ReDoS (CVE-2024-24762, CVE-2024-45338 style). 0.115.6 also patches
 #   the python-multipart boundary ReDoS (CVE-2024-47805).
-fastapi==0.140.7
-uvicorn[standard]==0.51.0
+fastapi==0.141.1
+uvicorn[standard]==0.52.3
 # python-multipart < 0.0.18 is vulnerable to a boundary-parsing ReDoS
 # (CVE-2024-47805) exploitable via multipart form uploads.
 python-multipart==0.0.32
 
 # --- Validation / settings ---
 pydantic==2.13.4
-pydantic-settings==2.14.2
+pydantic-settings==2.15.0
 email-validator==2.3.0
 
 # --- Database (async) ---
-sqlalchemy[asyncio]==2.0.51
-greenlet>=3.5.4            # required by SQLAlchemy's async engine (greenlet_spawn)
+sqlalchemy[asyncio]==2.0.52
+greenlet>=3.5.5            # required by SQLAlchemy's async engine (greenlet_spawn)
 asyncpg==0.31.0
 psycopg2-binary==2.9.12         # sync driver for one-off migrations/tools
 pgvector==0.5.0                # pgvector SQLAlchemy type (vector(N))
-alembic==1.18.5                # optional; schema is also installable via init.sql
+alembic==1.19.1                # optional; schema is also installable via init.sql
 
 # --- Auth ---
 PyJWT==2.13.0
 bcrypt==5.0.0
 
 # --- External Model Connectors (encrypted credential storage) ---
-cryptography==49.0.0
+cryptography==50.0.0
 
 # --- Tool validation ---
 jsonschema==4.26.0
 
 # --- Redis / cache ---
-redis[hiredis]==8.0.1
+redis[hiredis]==8.1.0
 
 # --- HTTP (used by tool connectors and Ollama client) ---
 httpx==0.28.1
 
 # --- Document parsing ---
-pypdf==6.14.2                   # PDF text extraction
+pypdf==6.16.1                   # PDF text extraction
 pdfplumber==0.11.10             # PDF tables / structure fallback
 python-docx==1.2.0             # DOCX
 openpyxl==3.1.5                # XLSX
 pandas==3.0.5                  # CSV / XLSX row processing
-chardet==7.4.3                 # CSV encoding detection
+chardet==7.6.0                 # CSV encoding detection
 
 # --- NLP / embeddings / keyword extraction ---
-numpy==2.5.1
+numpy==2.5.2
 scikit-learn==1.9.0
-sentence-transformers==5.6.1   # all-MiniLM-L6-v2 (384-dim)
-nltk==3.10.0
+sentence-transformers==5.7.0   # all-MiniLM-L6-v2 (384-dim)
+nltk==3.10.3
 tiktoken==0.13.0                # token counting for budget enforcement
 
 # --- Misc ---
